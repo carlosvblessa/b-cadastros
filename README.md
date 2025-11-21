@@ -7,6 +7,7 @@ Projeto para cadastros iniciais usando R, PostgreSQL e CouchDB.
 - `scripts/load_dominios_cnpj.R`: rotina de carga dos dominios CNPJ (mensal) a partir dos ZIPs da RFB, com controle de pastas e status.
 - `sql/postgres/001_create_cadastros.sql`: define as tabelas de cadastro no schema `admb_cads` (o script cria o schema se houver permissao).
 - `sql/postgres/002_ctrl_carga_dominios.sql`: cria tabela de controle `admb_cads.ctrl_carga_dominios_cnpj`.
+- `sql/postgres/003_cadastro_pf_pj.sql`: cria estruturas de CPF, CNPJ (cadastro e estabelecimentos), QSA e Simples Nacional.
 - `couchdb/`: espaco para configuracao de bancos e design docs do CouchDB.
 - `R/`: funcoes auxiliares que venham a ser compartilhadas entre os scripts R.
 
