@@ -1,0 +1,40 @@
+# b-cadastros
+
+Projeto para cadastros iniciais usando R, PostgreSQL e CouchDB.
+
+## Estrutura
+- `scripts/setup_postgres.R`: cria/valida o schema e aplica todos os SQLs em `sql/postgres`.
+- `scripts/load_dominios_cnpj.R`: rotina de carga dos dominios CNPJ (mensal) a partir dos ZIPs da RFB, com controle de pastas e status.
+- `sql/postgres/001_create_cadastros.sql`: define as tabelas de cadastro no schema `admb_cads` (o script cria o schema se houver permissao).
+- `sql/postgres/002_ctrl_carga_dominios.sql`: cria tabela de controle `admb_cads.ctrl_carga_dominios_cnpj`.
+- `couchdb/`: espaco para configuracao de bancos e design docs do CouchDB.
+- `R/`: funcoes auxiliares que venham a ser compartilhadas entre os scripts R.
+
+## Como rodar a estrutura no PostgreSQL
+1. Garanta o `.env` com as variaveis `DB_NAME`, `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`.
+2. Instale os pacotes R necessarios (uma vez):\
+   `install.packages(c("dotenv", "DBI", "RPostgres", "readr"))`
+3. Garanta que o usuario do `.env` tenha `CREATE` no database e `USAGE, CREATE` no schema `admb_cads`. Sem isso, peca ao DBA para rodar algo como:\
+   `CREATE SCHEMA IF NOT EXISTS admb_cads AUTHORIZATION user_cadapi;`\
+   `GRANT USAGE, CREATE ON SCHEMA admb_cads TO user_cadapi;`
+4. Execute o script de setup (estrutura/tabelas):\
+   `Rscript scripts/setup_postgres.R`
+
+## Carga rotineira dos dominios CNPJ
+1. Instale pacotes (alem dos anteriores):\
+   `install.packages(c("httr", "dplyr", "glue"))`
+2. Opcional:\
+   - Forcar uma pasta especifica de CNPJ: `CNPJ_PASTA_REF=2025-11`\
+   - Forcar recarga mesmo que ja exista OK: `CNPJ_FORCE_RELOAD=true`
+3. Rode a carga periodica:\
+   `Rscript scripts/load_dominios_cnpj.R`\
+   - O script detecta a pasta, baixa cada ZIP, trunca e recarrega as tabelas, registra status em `admb_cads.ctrl_carga_dominios_cnpj` e nao recarrega o que ja esta OK para a mesma pasta **a menos que** o header HTTP `Last-Modified` do ZIP seja mais novo que a `data_carga` registrada ou `CNPJ_FORCE_RELOAD` esteja ativo.
+
+## Proximos passos para CouchDB
+- Guarde design docs e arquivos auxiliares em `couchdb/design_docs`.
+- Para criar um banco via HTTP basico:\
+  `curl -X PUT http://COUCHDB_USER:COUCHDB_PASSWORD@COUCHDB_HOST:COUCHDB_PORT/nome_do_banco`
+- Para carregar um design doc:\
+  `curl -X PUT http://user:pass@host:port/nome_do_banco/_design/minha_view -H "Content-Type: application/json" -d @couchdb/design_docs/minha_view.json`
+
+> Observacao: o caractere `#` funciona como comentario em `.env`; caso a senha contenha `#`, use aspas ou escape para que o valor completo seja carregado.

@@ -1,0 +1,11 @@
+# R
+.Rhistory
+.RData
+.Rproj.user
+
+# Ambiente
+.env
+
+# Outros
+.DS_Store
+renv/library
