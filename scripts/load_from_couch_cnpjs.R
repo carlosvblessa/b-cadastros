@@ -158,30 +158,30 @@ couch_get <- function(db, id) {
   }
 }
 
-# cnpj_query <- Sys.getenv(
-#   "CNPJ_LIST_QUERY",
-#   unset = "SELECT num_cnpj 
-#   FROM admcadapi.cad_sefaz_pj c
-#   WHERE NOT EXISTS (
-#     SELECT 1
-#     FROM admb_cads.estabelecimento e
-#     WHERE e.num_cnpj = c.num_cnpj)"
-# )
-
 cnpj_query <- Sys.getenv(
   "CNPJ_LIST_QUERY",
-  unset = "SELECT num_cnpj
-FROM (
-    VALUES
-        ('00002121000172'),
-        ('00005275000118'),
-        ('00028682000140'),
-        ('00059822000229'),
-        ('00063960012298'),
-        ('00063960056074'),
-        ('00063960056317')
-) AS lista(num_cnpj)"
+  unset = "SELECT num_cnpj 
+  FROM admcadapi.cad_sefaz_pj c
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM admb_cads.estabelecimento e
+    WHERE e.num_cnpj = c.num_cnpj)"
 )
+
+# cnpj_query <- Sys.getenv(
+#   "CNPJ_LIST_QUERY",
+#   unset = "SELECT num_cnpj
+# FROM (
+#     VALUES
+#         ('00002121000172'),
+#         ('00005275000118'),
+#         ('00028682000140'),
+#         ('00059822000229'),
+#         ('00063960012298'),
+#         ('00063960056074'),
+#         ('00063960056317')
+# ) AS lista(num_cnpj)"
+# )
 
 
 cnpj_list <- tryCatch(
