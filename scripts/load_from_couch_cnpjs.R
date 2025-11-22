@@ -53,12 +53,12 @@ map_situacao_cadastral <- function(x) {
 
   res <- switch(
     cod,
-    "01" = "NULA",
-    "02" = "ATIVA",
-    "03" = "SUSPENSA",
-    "04" = "INAPTA",
-    "05" = "ATIVA NAO REGULAR",
-    "08" = "BAIXADO",
+    "01" = "Nula",
+    "02" = "Ativa",
+    "03" = "Suspensa",
+    "04" = "Inapta",
+    "05" = "Ativa Nao Regular",
+    "08" = "Baixada",
     NA_character_ # qualquer código inesperado fica como NA
   )
 
