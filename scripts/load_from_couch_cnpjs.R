@@ -544,6 +544,7 @@ processar_socios <- function(cnpj_full, socios) {
 pending_qsa <- list()
 queue <- unique(cnpjs)
 processed <- character(0)
+pending_contador_pj <- list()
 while (length(queue) > 0) {
   cnpj <- queue[1]
   queue <- queue[-1]
@@ -575,12 +576,12 @@ while (length(queue) > 0) {
       if (!estab_exists(contador_pj_safe) && !(contador_pj_safe %in% processed)) {
         if (!(contador_pj_safe %in% queue)) {
           write_log("Enfileirando contador PJ ", contador_pj_safe, " antes de carregar CNPJ ", cnpj)
-          queue <- c(contador_pj_safe, queue, cnpj)
-          next
+          queue <- c(queue, contador_pj_safe)
         } else {
-          write_log("Contador PJ ", contador_pj_safe, " ja enfileirado; FK ficara NULL nesta rodada se nao existir.")
-          contador_pj_safe <- NA_character_
+          write_log("Contador PJ ", contador_pj_safe, " ja enfileirado.")
         }
+        pending_contador_pj[[length(pending_contador_pj) + 1]] <- list(num_cnpj = cnpj, contador_pj = contador_pj_safe)
+        contador_pj_safe <- NA_character_
       }
     }
   }
@@ -626,7 +627,24 @@ while (length(queue) > 0) {
   }
 }
 
-# 5) Inserir QSA (após garantirmos cad/estab/socios PF/PJ carregados)
+# 5) Ajustar contador_pj pendente agora que todos foram processados
+if (length(pending_contador_pj) > 0) {
+  for (lnk in pending_contador_pj) {
+    if (estab_exists(lnk$contador_pj) && estab_exists(lnk$num_cnpj)) {
+      DBI::dbExecute(
+        con,
+        "UPDATE admb_cads.estabelecimento SET contador_pj = $1 WHERE num_cnpj = $2",
+        params = list(lnk$contador_pj, lnk$num_cnpj),
+        immediate = TRUE
+      )
+      write_log("Atualizado contador PJ ", lnk$contador_pj, " para estab ", lnk$num_cnpj)
+    } else {
+      write_log("Nao atualizado contador PJ ", lnk$contador_pj, " -> estab ", lnk$num_cnpj, " (ainda nao existe).")
+    }
+  }
+}
+
+# 6) Inserir QSA (após garantirmos cad/estab/socios PF/PJ carregados)
 for (row in pending_qsa) {
   socio_cpf_val <- if (!is.na(row$cpf_socio)) ensure_cpf(row$cpf_socio) else NA_character_
   socio_cnpj_val <- if (!is.na(row$cnpj_socio)) pad(row$cnpj_socio, 14) else NA_character_
