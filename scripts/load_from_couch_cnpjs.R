@@ -158,15 +158,31 @@ couch_get <- function(db, id) {
   }
 }
 
+# cnpj_query <- Sys.getenv(
+#   "CNPJ_LIST_QUERY",
+#   unset = "SELECT num_cnpj 
+#   FROM admcadapi.cad_sefaz_pj c
+#   WHERE NOT EXISTS (
+#     SELECT 1
+#     FROM admb_cads.estabelecimento e
+#     WHERE e.num_cnpj = c.num_cnpj)"
+# )
+
 cnpj_query <- Sys.getenv(
   "CNPJ_LIST_QUERY",
-  unset = "SELECT num_cnpj 
-  FROM admcadapi.cad_sefaz_pj c
-  WHERE NOT EXISTS (
-    SELECT 1
-    FROM admb_cads.estabelecimento e
-    WHERE e.num_cnpj = c.num_cnpj)"
+  unset = "SELECT num_cnpj
+FROM (
+    VALUES
+        ('00002121000172'),
+        ('00005275000118'),
+        ('00028682000140'),
+        ('00059822000229'),
+        ('00063960012298'),
+        ('00063960056074'),
+        ('00063960056317')
+) AS lista(num_cnpj)"
 )
+
 
 cnpj_list <- tryCatch(
   DBI::dbGetQuery(con, cnpj_query),
@@ -692,36 +708,69 @@ if (length(pending_contador_pj) > 0) {
 }
 
 # 6) Inserir QSA (após garantirmos cad/estab/socios PF/PJ carregados)
-for (row in pending_qsa) {
-  socio_cpf_val <- if (!is.na(row$cpf_socio)) ensure_cpf(row$cpf_socio) else NA_character_
-  socio_cnpj_val <- if (!is.na(row$cnpj_socio)) pad(row$cnpj_socio, 14) else NA_character_
+# 6) Inserir QSA (após garantirmos cad/estab/socios PF/PJ carregados)
+write_log("Total de linhas QSA pendentes para inserir: ", length(pending_qsa))
 
+for (row in pending_qsa) {
+  # garante escalares, com NA se não houver
+  socio_cpf_val  <- if (!is.na(row$cpf_socio)) ensure_cpf(row$cpf_socio) else NA_character_
+  socio_cnpj_val <- if (!is.na(row$cnpj_socio)) pad(row$cnpj_socio, 14)  else NA_character_
+  cpf_rep_val    <- if (!is.na(row$cpf_rep))    ensure_cpf(row$cpf_rep)  else NA_character_
+
+  # se socio PJ e o estab ainda não existe, mantém a mesma lógica de antes
   if (!is.na(socio_cnpj_val) && !estab_exists(socio_cnpj_val)) {
-    write_log("QSA: socio PJ ", socio_cnpj_val, " ainda nao carregado; pulando insercao para CNPJ ", row$num_cnpj)
+    write_log(
+      "QSA: socio PJ ", socio_cnpj_val,
+      " ainda nao carregado; pulando insercao para CNPJ ", row$num_cnpj
+    )
     next
   }
 
-  DBI::dbExecute(
-    con,
-    sprintf(
+  num_cnpj_val   <- row$num_cnpj
+  qual_socio_val <- row$qual_socio
+  tipo_socio_val <- row$tipo_socio
+  qual_rep_val   <- row$qual_rep
+  data_ent_val   <- row$data_ent  # já é Date ou NA
+
+  # segurança extra: garante comprimento 1 sempre
+  if (length(num_cnpj_val)   == 0) num_cnpj_val   <- NA_character_
+  if (length(socio_cpf_val)  == 0) socio_cpf_val  <- NA_character_
+  if (length(socio_cnpj_val) == 0) socio_cnpj_val <- NA_character_
+  if (length(qual_socio_val) == 0) qual_socio_val <- NA_character_
+  if (length(tipo_socio_val) == 0) tipo_socio_val <- NA_character_
+  if (length(cpf_rep_val)    == 0) cpf_rep_val    <- NA_character_
+  if (length(qual_rep_val)   == 0) qual_rep_val   <- NA_character_
+  if (length(data_ent_val)   == 0) data_ent_val   <- as.Date(NA)
+
+  tryCatch({
+    DBI::dbExecute(
+      con,
       "
-      INSERT INTO admb_cads.qsa
-        (num_cnpj, cpf_socio, cnpj_socio, qualificacao_socio, tipo_socio,
-         cpf_representante, qualificacao_rep, data_entrada)
-      VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-      ON CONFLICT DO NOTHING
+        INSERT INTO admb_cads.qsa
+          (num_cnpj, cpf_socio, cnpj_socio, qualificacao_socio, tipo_socio,
+           cpf_representante, qualificacao_rep, data_entrada)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT DO NOTHING
       ",
-      DBI::dbQuoteString(con, row$num_cnpj),
-      if (is.na(socio_cpf_val)) "NULL" else DBI::dbQuoteString(con, socio_cpf_val),
-      if (is.na(socio_cnpj_val)) "NULL" else DBI::dbQuoteString(con, socio_cnpj_val),
-      if (is.na(row$qual_socio)) "NULL" else DBI::dbQuoteString(con, row$qual_socio),
-      if (is.na(row$tipo_socio)) "NULL" else DBI::dbQuoteString(con, row$tipo_socio),
-      if (is.na(ensure_cpf(row$cpf_rep))) "NULL" else DBI::dbQuoteString(con, ensure_cpf(row$cpf_rep)),
-      if (is.na(row$qual_rep)) "NULL" else DBI::dbQuoteString(con, row$qual_rep),
-      if (is.na(row$data_ent)) "NULL" else DBI::dbQuoteString(con, as.character(row$data_ent))
-    ),
-    immediate = TRUE
-  )
+      params = list(
+        num_cnpj_val,
+        socio_cpf_val,
+        socio_cnpj_val,
+        qual_socio_val,
+        tipo_socio_val,
+        cpf_rep_val,
+        qual_rep_val,
+        data_ent_val
+      )
+    )
+  }, error = function(e) {
+    write_log(
+      "ERRO ao inserir QSA para CNPJ ", num_cnpj_val,
+      " (cpf_socio=", socio_cpf_val,
+      ", cnpj_socio=", socio_cnpj_val,
+      "): ", e$message
+    )
+  })
 }
 
 write_log("Carga via CouchDB finalizada. Processados: ", length(processed), " CNPJs (incluindo socios PJ enfileirados). QSA inserido apos dependencia.")
