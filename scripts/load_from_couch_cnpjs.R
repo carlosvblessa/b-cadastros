@@ -65,6 +65,28 @@ map_situacao_cadastral <- function(x) {
   res
 }
 
+map_porte_empresa <- function(x) {
+  if (is.null(x) || length(x) == 0) return(NA_character_)
+
+  cod <- as.character(x[[1]])
+  cod <- stringr::str_trim(cod)
+
+  if (!nzchar(cod)) return(NA_character_)
+
+  # garante 2 dígitos se vier "1", "3", "5"
+  if (nchar(cod) == 1) cod <- paste0("0", cod)
+
+  res <- switch(
+    cod,
+    "01" = "Microempresa",
+    "03" = "Empresa de Pequeno Porte",
+    "05" = "Demais",
+    NA_character_  # qualquer outro código vira NA (ajuste se quiser outro comportamento)
+  )
+
+  res
+}
+
 ensure_fk <- function(table, column, value) {
   if (is.null(value) || length(value) == 0) return(NA_character_)
   v <- one_chr(value)
@@ -320,7 +342,7 @@ upsert_cadastro <- function(doc, cpf_responsavel = NA_character_) {
       raiz,
       one_chr(doc$nomeEmpresarial) %||% NA_character_,
       one_chr(doc$naturezaJuridica) %||% NA_character_,
-      one_chr(doc$porteEmpresa) %||% NA_character_,
+      map_porte_empresa(doc$porteEmpresa),
       capital_num,
       cpf_resp_use,
       one_chr(doc$qualificacaoResponsavel) %||% NA_character_,
