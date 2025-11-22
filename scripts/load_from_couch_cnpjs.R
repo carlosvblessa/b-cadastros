@@ -113,8 +113,14 @@ couch_get <- function(db, id) {
 
 cnpj_query <- Sys.getenv(
   "CNPJ_LIST_QUERY",
-  unset = "select num_cnpj from admcadapi.cad_sefaz_pj"
+  unset = "SELECT num_cnpj 
+  FROM admcadapi.cad_sefaz_pj c
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM admb_cads.estabelecimento e
+    WHERE e.num_cnpj = c.num_cnpj)"
 )
+
 cnpj_list <- tryCatch(
   DBI::dbGetQuery(con, cnpj_query),
   error = function(e) stop("Erro ao buscar lista de CNPJs: ", e$message)
