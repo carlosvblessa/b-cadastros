@@ -223,6 +223,7 @@ baixar_ler_zip <- function(pasta_aaaa_mm, nome_zip, delim = ";") {
     delim = delim,
     locale = readr::locale(encoding = "Latin1"),
     col_types = readr::cols(.default = readr::col_character()),
+    col_names = FALSE, # arquivos nao trazem cabeçalho; evita perder a primeira linha
     trim_ws = TRUE,
     progress = FALSE
   )
@@ -261,15 +262,29 @@ processar_zip_para_tabela <- function(con, pasta, cfg) {
 
     df <- dplyr::mutate(df, dplyr::across(dplyr::everything(), ~ trimws(.x)))
 
+    key_col <- cfg$key
+    cols <- cfg$cols
+    col_list <- paste(DBI::dbQuoteIdentifier(con, cols), collapse = ", ")
+    placeholders <- paste0("$", seq_along(cols), collapse = ", ")
+    set_clause <- paste(
+      sprintf("%s = EXCLUDED.%s", DBI::dbQuoteIdentifier(con, cols[cols != key_col]), DBI::dbQuoteIdentifier(con, cols[cols != key_col])),
+      collapse = ", "
+    )
+    upsert_sql <- sprintf(
+      "INSERT INTO %s.%s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
+      schema_name,
+      cfg$table,
+      col_list,
+      placeholders,
+      DBI::dbQuoteIdentifier(con, key_col),
+      set_clause
+    )
+
     DBI::dbWithTransaction(con, {
-      DBI::dbExecute(con, sprintf("TRUNCATE TABLE %s.%s", schema_name, cfg$table))
-      DBI::dbWriteTable(
-        con,
-        DBI::Id(schema = schema_name, table = cfg$table),
-        df,
-        append = TRUE,
-        row.names = FALSE
-      )
+      for (i in seq_len(nrow(df))) {
+        vals <- unname(as.list(df[i, ])) # remove nomes para evitar erro de params nomeados
+        DBI::dbExecute(con, upsert_sql, params = vals)
+      }
     })
 
     write_log("Tabela", paste(schema_name, cfg$table, sep = "."), "atualizada com", nrow(df), "linhas.")
@@ -284,12 +299,12 @@ processar_zip_para_tabela <- function(con, pasta, cfg) {
 
 carregar_dominios_cnpj <- function(con, pasta_ref) {
   dominios <- list(
-    list(zip = "Cnaes.zip",         table = "cad_atividades",        cols = c("num_atv", "desc_atv")),
-    list(zip = "Naturezas.zip",     table = "cad_natureza_juridica", cols = c("num_natureza_juridica", "dsc_natureza_juridica")),
-    list(zip = "Qualificacoes.zip", table = "cad_tipo_socio",        cols = c("num_tipo_socio", "desc_tipo_socio")),
-    list(zip = "Motivos.zip",       table = "cad_motivo_situcada",   cols = c("cod_motivo_situcada", "dsc_motivo_situcada")),
-    list(zip = "Paises.zip",        table = "cad_pais",              cols = c("cod_pais", "nom_pais")),
-    list(zip = "Municipios.zip",    table = "cad_municipio",         cols = c("cod_municipio_rfb", "nom_municipio"))
+    list(zip = "Cnaes.zip",         table = "cad_atividades",        cols = c("num_atv", "desc_atv"), key = "num_atv"),
+    list(zip = "Naturezas.zip",     table = "cad_natureza_juridica", cols = c("num_natureza_juridica", "dsc_natureza_juridica"), key = "num_natureza_juridica"),
+    list(zip = "Qualificacoes.zip", table = "cad_tipo_socio",        cols = c("num_tipo_socio", "desc_tipo_socio"), key = "num_tipo_socio"),
+    list(zip = "Motivos.zip",       table = "cad_motivo_situcada",   cols = c("cod_motivo_situcada", "dsc_motivo_situcada"), key = "cod_motivo_situcada"),
+    list(zip = "Paises.zip",        table = "cad_pais",              cols = c("cod_pais", "nom_pais"), key = "cod_pais"),
+    list(zip = "Municipios.zip",    table = "cad_municipio",         cols = c("cod_municipio_rfb", "nom_municipio"), key = "cod_municipio_rfb")
   )
 
   for (cfg in dominios) {

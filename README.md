@@ -5,9 +5,11 @@ Projeto para cadastros iniciais usando R, PostgreSQL e CouchDB.
 ## Estrutura
 - `scripts/setup_postgres.R`: cria/valida o schema e aplica todos os SQLs em `sql/postgres`.
 - `scripts/load_dominios_cnpj.R`: rotina de carga dos dominios CNPJ (mensal) a partir dos ZIPs da RFB, com controle de pastas e status.
+- `scripts/load_from_couch_cnpjs.R`: rotina de carga seletiva (CPF/CNPJ/SN) a partir dos bancos CouchDB para uma lista de CNPJs.
 - `sql/postgres/001_create_cadastros.sql`: define as tabelas de cadastro no schema `admb_cads` (o script cria o schema se houver permissao).
 - `sql/postgres/002_ctrl_carga_dominios.sql`: cria tabela de controle `admb_cads.ctrl_carga_dominios_cnpj`.
 - `sql/postgres/003_cadastro_pf_pj.sql`: cria estruturas de CPF, CNPJ (cadastro e estabelecimentos), QSA e Simples Nacional.
+- `sql/postgres/003_cadastro_pf_pj.sql`: cria estruturas de CPF, CNPJ (cadastro e estabelecimentos), QSA e Simples Nacional (inclui FK de contador PJ e tabela de atividades secundarias).
 - `couchdb/`: espaco para configuracao de bancos e design docs do CouchDB.
 - `R/`: funcoes auxiliares que venham a ser compartilhadas entre os scripts R.
 
@@ -30,6 +32,13 @@ Projeto para cadastros iniciais usando R, PostgreSQL e CouchDB.
 3. Rode a carga periodica:\
    `Rscript scripts/load_dominios_cnpj.R`\
    - O script detecta a pasta, baixa cada ZIP, trunca e recarrega as tabelas, registra status em `admb_cads.ctrl_carga_dominios_cnpj` e nao recarrega o que ja esta OK para a mesma pasta **a menos que** o header HTTP `Last-Modified` do ZIP seja mais novo que a `data_carga` registrada ou `CNPJ_FORCE_RELOAD` esteja ativo.
+
+## Carga seletiva a partir do CouchDB (CPF/CNPJ/SN)
+1. Pacotes: `install.packages(c("httr", "jsonlite", "stringr"))` (além dos basicos de DBI/RPostgres/dotenv).
+2. Exige variaveis de Couch no `.env`: `COUCHDB_SCHEME`, `COUCHDB_HOST`, `COUCHDB_PORT`, `COUCHDB_USER`, `COUCHDB_PASSWORD` (aliases `COUCH_*` tambem funcionam). Bancos default: `chcnpj_bcadastros_replica`, `chcpf_bcadastros_replica`, `chsn_bcadastros_replica`.
+3. Lista de CNPJs: por default `select cnpj from admcadapi.lista2_cnpjs`; altere via `CNPJ_LIST_QUERY` se precisar.
+4. Rode: `Rscript scripts/load_from_couch_cnpjs.R`\
+   - Para cada CNPJ, pega raiz (8) para cadastro e Simples, CNPJ completo para estabelecimento, grava o CPF do responsavel (se nao existir), carrega socios (distinguindo F/J e buscando CPF quando F) e popular QSA. Upserts via ON CONFLICT nas tabelas.
 
 ## Proximos passos para CouchDB
 - Guarde design docs e arquivos auxiliares em `couchdb/design_docs`.

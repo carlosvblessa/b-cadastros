@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS admb_cads.estabelecimento (
   telefone1             text,
   telefone2             text,
   contador_pf           char(11) REFERENCES admb_cads.cad_cpf (num_cpf),
-  contador_pj           char(14),
+  contador_pj           char(14) REFERENCES admb_cads.estabelecimento (num_cnpj),
   uf_crc_contador_pf    char(2),
   uf_crc_contador_pj    char(2),
   seq_crc_contador_pf   text,
@@ -82,22 +82,32 @@ CREATE TABLE IF NOT EXISTS admb_cads.estabelecimento (
   tipo_crc_contador_pj  text,
   data_inicio_atividade date,
   cnae_principal        text REFERENCES admb_cads.cad_atividades (num_atv),
-  cnae_secundarias      text[],
   data_carga            timestamptz DEFAULT now()
 );
 
 -- ===================================================================
--- QSA (Quadro Societario e Administradores)
+-- QSA (Quadro Societario e Administradores) (b-Cadastros CNPJ)
 -- ===================================================================
 CREATE TABLE IF NOT EXISTS admb_cads.qsa (
   id_qsa             bigserial PRIMARY KEY,
   num_cnpj           char(14) REFERENCES admb_cads.estabelecimento (num_cnpj),
-  cpf_cnpj_socio     text,
+  cpf_socio          char(11) REFERENCES admb_cads.cad_cpf (num_cpf),
+  cnpj_socio         char(14) REFERENCES admb_cads.estabelecimento (num_cnpj),
   qualificacao_socio text REFERENCES admb_cads.cad_tipo_socio (num_tipo_socio),
-  tipo_socio         char(1) CHECK (tipo_socio IN ('F','J')),
+  tipo_socio         char(1) CHECK (tipo_socio IN ('F','J','E')),
   cpf_representante  char(11) REFERENCES admb_cads.cad_cpf (num_cpf),
   qualificacao_rep   text REFERENCES admb_cads.cad_tipo_socio (num_tipo_socio),
   data_entrada       date,
+  data_carga         timestamptz DEFAULT now()
+);
+
+-- ===================================================================
+-- Atividades Secundarias (b-Cadastros CNPJ)
+-- ===================================================================
+CREATE TABLE IF NOT EXISTS admb_cads.atividades_secundarias (
+  id_atv_sec         bigserial PRIMARY KEY,
+  num_cnpj           char(14) REFERENCES admb_cads.estabelecimento (num_cnpj),
+  cnae_secundaria    text REFERENCES admb_cads.cad_atividades (num_atv),
   data_carga         timestamptz DEFAULT now()
 );
 
