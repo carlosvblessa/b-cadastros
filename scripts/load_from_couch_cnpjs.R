@@ -40,6 +40,31 @@ one_int <- function(x) {
   as.integer(v)
 }
 
+map_situacao_cadastral <- function(x) {
+  if (is.null(x) || length(x) == 0) return(NA_character_)
+
+  cod <- as.character(x[[1]])
+  cod <- stringr::str_trim(cod)
+
+  if (!nzchar(cod)) return(NA_character_)
+
+  # garante 2 dígitos se vier "1", "2" etc
+  if (nchar(cod) == 1) cod <- paste0("0", cod)
+
+  res <- switch(
+    cod,
+    "01" = "NULA",
+    "02" = "ATIVA",
+    "03" = "SUSPENSA",
+    "04" = "INAPTA",
+    "05" = "ATIVA NAO REGULAR",
+    "08" = "BAIXADO",
+    NA_character_ # qualquer código inesperado fica como NA
+  )
+
+  res
+}
+
 ensure_fk <- function(table, column, value) {
   if (is.null(value) || length(value) == 0) return(NA_character_)
   v <- one_chr(value)
@@ -366,7 +391,7 @@ upsert_estabelecimento <- function(doc, cpf_contador_pf = NA_character_, contado
       raiz,
       one_chr(doc$nomeFantasia) %||% NA_character_,
       one_chr(doc$indicadorMatriz) %||% NA_character_,
-      one_chr(doc$situacaoCadastral) %||% NA_character_,
+      map_situacao_cadastral(doc$situacaoCadastral),
       parse_date_ymd(one_chr(doc$dataSituacaoCadastral)),
       motivo_val,
       one_chr(doc$tipoLogradouro) %||% NA_character_,
