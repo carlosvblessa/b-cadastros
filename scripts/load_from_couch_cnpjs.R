@@ -30,6 +30,12 @@ on.exit(DBI::dbDisconnect(con), add = TRUE)
 write_log <- function(...) cat(format(Sys.time()), "-", ..., "\n")
 `%||%` <- function(a, b) if (!is.null(a) && length(a) > 0) a else b
 
+commit_size <- suppressWarnings(as.integer(Sys.getenv("BATCH_COMMIT_SIZE", "50")))
+if (is.na(commit_size) || commit_size <= 0) {
+  commit_size <- 50
+}
+write_log("BATCH_COMMIT_SIZE = ", commit_size)
+
 one_chr <- function(x) {
   if (is.null(x) || length(x) == 0) return(NA_character_)
   as.character(x[[1]])
@@ -170,6 +176,11 @@ cnpj_query <- Sys.getenv(
 
 # cnpj_query <- Sys.getenv(
 #   "CNPJ_LIST_QUERY",
+#   unset = "select distinct num_cnpj from admcadapi.qsa limit 100"
+# )
+
+# cnpj_query <- Sys.getenv(
+#   "CNPJ_LIST_QUERY",
 #   unset = "SELECT num_cnpj
 # FROM (
 #     VALUES
@@ -235,24 +246,22 @@ upsert_secundarias <- function(doc, cnpj_full) {
   secs <- unlist(doc$cnaeSecundarias %||% list(), use.names = FALSE)
   secs <- stringr::str_trim(as.character(secs))
   secs <- secs[nzchar(secs)]
-  DBI::dbWithTransaction(con, {
-    DBI::dbExecute(con, "DELETE FROM admb_cads.atividades_secundarias WHERE num_cnpj = $1", params = list(cnpj_full))
-    if (length(secs) > 0) {
-      for (cnae in secs) {
-        cnae_val <- ensure_fk("cad_atividades", "num_atv", cnae)
-        if (is.na(cnae_val)) next
-        DBI::dbExecute(
-          con,
-          sprintf(
-            "INSERT INTO admb_cads.atividades_secundarias (num_cnpj, cnae_secundaria) VALUES (%s, %s)",
-            DBI::dbQuoteString(con, cnpj_full),
-            DBI::dbQuoteString(con, cnae_val)
-          ),
-          immediate = TRUE
-        )
-      }
+  DBI::dbExecute(con, "DELETE FROM admb_cads.atividades_secundarias WHERE num_cnpj = $1", params = list(cnpj_full))
+  if (length(secs) > 0) {
+    for (cnae in secs) {
+      cnae_val <- ensure_fk("cad_atividades", "num_atv", cnae)
+      if (is.na(cnae_val)) next
+      DBI::dbExecute(
+        con,
+        sprintf(
+          "INSERT INTO admb_cads.atividades_secundarias (num_cnpj, cnae_secundaria) VALUES (%s, %s)",
+          DBI::dbQuoteString(con, cnpj_full),
+          DBI::dbQuoteString(con, cnae_val)
+        ),
+        immediate = TRUE
+      )
     }
-  })
+  }
 }
 
 upsert_cpf <- function(doc) {
@@ -527,7 +536,6 @@ processar_socios <- function(cnpj_full, socios) {
   conteudo <- jsonlite::fromJSON(jsonlite::toJSON(socios, auto_unbox = TRUE))
   if (nrow(conteudo) == 0) return(list(novos_cnpjs = character(0), rows = list()))
   drops <- c("cpfCnpj", "cnpjCpf", "cpfCnpjSocio", "cnpjCpfSocio", "cpfSocio")
-  DBI::dbExecute(con, "DELETE FROM admb_cads.qsa WHERE num_cnpj = $1", params = list(cnpj_full))
   novos_cnpjs <- character(0)
   rows <- list()
   for (i in seq_len(nrow(conteudo))) {
@@ -561,7 +569,7 @@ processar_socios <- function(cnpj_full, socios) {
         tipo_socio <- "J"
       } else if (tipo_flag == "3") { # Estrangeiro
         socio_cnpj <- socio_id_full
-        tipo_socio <- "J" # mantem registro mas marca como J para satisfazer constraint
+        tipo_socio <- "E"
       }
     }
 
@@ -603,11 +611,81 @@ processar_socios <- function(cnpj_full, socios) {
   list(novos_cnpjs = unique(novos_cnpjs), rows = rows)
 }
 
-# Processamento em BFS: comeca com a lista inicial e enfileira socios PJ encontrados
+# Processamento em BFS com commits por tamanho de lote
 pending_qsa <- list()
 queue <- unique(cnpjs)
 processed <- character(0)
 pending_contador_pj <- list()
+batch_count <- 0
+DBI::dbBegin(con)
+
+resolve_contador_pj <- function() {
+  if (length(pending_contador_pj) == 0) return()
+  remaining <- list()
+  for (lnk in pending_contador_pj) {
+    if (estab_exists(lnk$contador_pj) && estab_exists(lnk$num_cnpj)) {
+      sql_upd <- sprintf(
+        "UPDATE admb_cads.estabelecimento SET contador_pj = %s WHERE num_cnpj = %s",
+        DBI::dbQuoteString(con, lnk$contador_pj),
+        DBI::dbQuoteString(con, lnk$num_cnpj)
+      )
+      DBI::dbExecute(con, sql_upd, immediate = TRUE)
+      write_log("Atualizado contador PJ ", lnk$contador_pj, " para estab ", lnk$num_cnpj)
+    } else {
+      remaining[[length(remaining) + 1]] <- lnk
+    }
+  }
+  pending_contador_pj <<- remaining
+}
+
+flush_batch <- function() {
+  # tenta resolver contadores pendentes que ja existem
+  resolve_contador_pj()
+
+  # insere QSA pendente (somente se as dependencias existem)
+  if (length(pending_qsa) > 0) {
+    for (row in pending_qsa) {
+      socio_cpf_val <- if (!is.na(row$cpf_socio)) ensure_cpf(row$cpf_socio) else NA_character_
+      socio_cnpj_val <- if (!is.na(row$cnpj_socio)) pad(row$cnpj_socio, 14) else NA_character_
+
+      if (!is.na(socio_cnpj_val) && !estab_exists(socio_cnpj_val)) {
+        # ainda nao existe o PJ do socio; deixa para a proxima
+        next
+      }
+
+      q <- function(val) if (is.na(val) || length(val) == 0) "NULL" else DBI::dbQuoteString(con, val)
+      sql_qsa <- sprintf(
+        "
+        INSERT INTO admb_cads.qsa
+          (num_cnpj, cpf_socio, cnpj_socio, qualificacao_socio, tipo_socio,
+           cpf_representante, qualificacao_rep, data_entrada)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT DO NOTHING
+        ",
+        q(row$num_cnpj),
+        q(socio_cpf_val),
+        q(socio_cnpj_val),
+        q(row$qual_socio),
+        q(row$tipo_socio),
+        q(ensure_cpf(row$cpf_rep)),
+        q(row$qual_rep),
+        if (is.na(row$data_ent) || length(row$data_ent) == 0) "NULL" else DBI::dbQuoteString(con, as.character(row$data_ent))
+      )
+      DBI::dbExecute(con, sql_qsa, immediate = TRUE)
+    }
+    # remove os que foram inseridos (dependencia resolvida)
+    pending_qsa <<- Filter(function(r) {
+      socio_cnpj_val <- if (!is.na(r$cnpj_socio)) pad(r$cnpj_socio, 14) else NA_character_
+      !is.na(socio_cnpj_val) && !estab_exists(socio_cnpj_val)
+    }, pending_qsa)
+  }
+
+  DBI::dbCommit(con)
+  DBI::dbBegin(con)
+  batch_count <<- 0
+  write_log("Commit aplicado; pendentes contador_pj=", length(pending_contador_pj), ", pendentes QSA=", length(pending_qsa))
+}
+
 while (length(queue) > 0) {
   cnpj <- queue[1]
   queue <- queue[-1]
@@ -688,89 +766,19 @@ while (length(queue) > 0) {
   } else {
     write_log("Documento de Simples/MEI nao encontrado para raiz ", raiz, " (empresa pode nunca ter optado).")
   }
-}
 
-# 5) Ajustar contador_pj pendente agora que todos foram processados
-if (length(pending_contador_pj) > 0) {
-  for (lnk in pending_contador_pj) {
-    if (estab_exists(lnk$contador_pj) && estab_exists(lnk$num_cnpj)) {
-      DBI::dbExecute(
-        con,
-        "UPDATE admb_cads.estabelecimento SET contador_pj = $1 WHERE num_cnpj = $2",
-        params = list(lnk$contador_pj, lnk$num_cnpj),
-        immediate = TRUE
-      )
-      write_log("Atualizado contador PJ ", lnk$contador_pj, " para estab ", lnk$num_cnpj)
-    } else {
-      write_log("Nao atualizado contador PJ ", lnk$contador_pj, " -> estab ", lnk$num_cnpj, " (ainda nao existe).")
-    }
+  # tenta resolver contadores pendentes logo apos processar este CNPJ
+  resolve_contador_pj()
+
+  batch_count <- batch_count + 1
+  if (batch_count >= commit_size) {
+    flush_batch()
   }
 }
 
-# 6) Inserir QSA (após garantirmos cad/estab/socios PF/PJ carregados)
-# 6) Inserir QSA (após garantirmos cad/estab/socios PF/PJ carregados)
-write_log("Total de linhas QSA pendentes para inserir: ", length(pending_qsa))
-
-for (row in pending_qsa) {
-  # garante escalares, com NA se não houver
-  socio_cpf_val  <- if (!is.na(row$cpf_socio)) ensure_cpf(row$cpf_socio) else NA_character_
-  socio_cnpj_val <- if (!is.na(row$cnpj_socio)) pad(row$cnpj_socio, 14)  else NA_character_
-  cpf_rep_val    <- if (!is.na(row$cpf_rep))    ensure_cpf(row$cpf_rep)  else NA_character_
-
-  # se socio PJ e o estab ainda não existe, mantém a mesma lógica de antes
-  if (!is.na(socio_cnpj_val) && !estab_exists(socio_cnpj_val)) {
-    write_log(
-      "QSA: socio PJ ", socio_cnpj_val,
-      " ainda nao carregado; pulando insercao para CNPJ ", row$num_cnpj
-    )
-    next
-  }
-
-  num_cnpj_val   <- row$num_cnpj
-  qual_socio_val <- row$qual_socio
-  tipo_socio_val <- row$tipo_socio
-  qual_rep_val   <- row$qual_rep
-  data_ent_val   <- row$data_ent  # já é Date ou NA
-
-  # segurança extra: garante comprimento 1 sempre
-  if (length(num_cnpj_val)   == 0) num_cnpj_val   <- NA_character_
-  if (length(socio_cpf_val)  == 0) socio_cpf_val  <- NA_character_
-  if (length(socio_cnpj_val) == 0) socio_cnpj_val <- NA_character_
-  if (length(qual_socio_val) == 0) qual_socio_val <- NA_character_
-  if (length(tipo_socio_val) == 0) tipo_socio_val <- NA_character_
-  if (length(cpf_rep_val)    == 0) cpf_rep_val    <- NA_character_
-  if (length(qual_rep_val)   == 0) qual_rep_val   <- NA_character_
-  if (length(data_ent_val)   == 0) data_ent_val   <- as.Date(NA)
-
-  tryCatch({
-    DBI::dbExecute(
-      con,
-      "
-        INSERT INTO admb_cads.qsa
-          (num_cnpj, cpf_socio, cnpj_socio, qualificacao_socio, tipo_socio,
-           cpf_representante, qualificacao_rep, data_entrada)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        ON CONFLICT DO NOTHING
-      ",
-      params = list(
-        num_cnpj_val,
-        socio_cpf_val,
-        socio_cnpj_val,
-        qual_socio_val,
-        tipo_socio_val,
-        cpf_rep_val,
-        qual_rep_val,
-        data_ent_val
-      )
-    )
-  }, error = function(e) {
-    write_log(
-      "ERRO ao inserir QSA para CNPJ ", num_cnpj_val,
-      " (cpf_socio=", socio_cpf_val,
-      ", cnpj_socio=", socio_cnpj_val,
-      "): ", e$message
-    )
-  })
+# flush final para pendencias restantes
+if (batch_count > 0 || length(pending_contador_pj) > 0 || length(pending_qsa) > 0) {
+  flush_batch()
 }
 
 write_log("Carga via CouchDB finalizada. Processados: ", length(processed), " CNPJs (incluindo socios PJ enfileirados). QSA inserido apos dependencia.")
