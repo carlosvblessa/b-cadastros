@@ -577,11 +577,12 @@ calc_sn_flags <- function(periodos) {
 
   df <- df[order(df$InicioDate), , drop = FALSE]
   ativo <- "N"
-  dt_ini <- if (length(na.omit(df$InicioDate)) > 0) min(df$InicioDate, na.rm = TRUE) else NA
-  dt_fim <- if (length(na.omit(df$FimDate)) > 0) max(df$FimDate, na.rm = TRUE) else NA
-  if (nrow(df) > 0) {
-    ultimo <- df[nrow(df), ]
-    if (is.na(ultimo$FimDate) && !ultimo$Cancelado && !ultimo$Anulado) ativo <- "S"
+  # consideramos apenas o ultimo periodo (situacao atual)
+  ultimo <- df[nrow(df), ]
+  dt_ini <- ultimo$InicioDate
+  dt_fim <- ultimo$FimDate
+  if (is.na(dt_fim) && !ultimo$Cancelado && !ultimo$Anulado) {
+    ativo <- "S"
   }
   list(ativo = ativo, dt_ini = dt_ini, dt_fim = dt_fim)
 }
