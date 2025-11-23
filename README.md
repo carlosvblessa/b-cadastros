@@ -5,11 +5,10 @@ Projeto para cadastros iniciais usando R, PostgreSQL e CouchDB.
 ## Estrutura
 - `scripts/setup_postgres.R`: cria/valida o schema e aplica todos os SQLs em `sql/postgres`.
 - `scripts/load_dominios_cnpj.R`: rotina de carga dos dominios CNPJ (mensal) a partir dos ZIPs da RFB, com controle de pastas e status.
-- `scripts/load_from_couch_cnpjs.R`: rotina de carga seletiva (CPF/CNPJ/SN) a partir dos bancos CouchDB para uma lista de CNPJs.
+- `scripts/load_from_couch_cnpjs.R`: rotina de carga seletiva (CPF/CNPJ/SN) a partir dos bancos CouchDB para uma lista de CNPJs, com BFS para trazer socios PJ/contadores PJ referenciados e commits em lotes.
 - `sql/postgres/001_create_cadastros.sql`: define as tabelas de cadastro no schema `admb_cads` (o script cria o schema se houver permissao).
 - `sql/postgres/002_ctrl_carga_dominios.sql`: cria tabela de controle `admb_cads.ctrl_carga_dominios_cnpj`.
-- `sql/postgres/003_cadastro_pf_pj.sql`: cria estruturas de CPF, CNPJ (cadastro e estabelecimentos), QSA e Simples Nacional.
-- `sql/postgres/003_cadastro_pf_pj.sql`: cria estruturas de CPF, CNPJ (cadastro e estabelecimentos), QSA e Simples Nacional (inclui FK de contador PJ e tabela de atividades secundarias).
+- `sql/postgres/003_cadastro_pf_pj.sql`: cria estruturas de CPF, CNPJ (cadastro e estabelecimentos), QSA, Simples Nacional e atividades secundarias (FK de contador PJ já incluída).
 - `couchdb/`: espaco para configuracao de bancos e design docs do CouchDB.
 - `R/`: funcoes auxiliares que venham a ser compartilhadas entre os scripts R.
 
@@ -38,7 +37,7 @@ Projeto para cadastros iniciais usando R, PostgreSQL e CouchDB.
 2. Exige variaveis de Couch no `.env`: `COUCHDB_SCHEME`, `COUCHDB_HOST`, `COUCHDB_PORT`, `COUCHDB_USER`, `COUCHDB_PASSWORD` (aliases `COUCH_*` tambem funcionam). Bancos default: `chcnpj_bcadastros_replica`, `chcpf_bcadastros_replica`, `chsn_bcadastros_replica`.
 3. Lista de CNPJs: por default `select cnpj from admcadapi.lista2_cnpjs`; altere via `CNPJ_LIST_QUERY` se precisar.
 4. Rode: `Rscript scripts/load_from_couch_cnpjs.R`\
-   - Para cada CNPJ, pega raiz (8) para cadastro e Simples, CNPJ completo para estabelecimento, grava o CPF do responsavel (se nao existir), carrega socios (distinguindo F/J e buscando CPF quando F) e popular QSA. Upserts via ON CONFLICT nas tabelas.
+   - Para cada CNPJ, pega raiz (8) para cadastro e Simples, CNPJ completo para estabelecimento, grava o CPF do responsavel (se nao existir), carrega socios (distinguindo F/J/E via campo `tipo`), popula QSA (agora com `cpf_socio`/`cnpj_socio` separados) e atividades secundarias em tabela própria. Executa em BFS enfileirando socios PJ e contadores PJ referenciados. Usa commits por lote (`BATCH_COMMIT_SIZE`, default 50); pendencias de contador PJ e QSA são resolvidas a cada commit e no final.
 
 ## Proximos passos para CouchDB
 - Guarde design docs e arquivos auxiliares em `couchdb/design_docs`.
