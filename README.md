@@ -37,7 +37,7 @@ Projeto para cadastros iniciais usando R, PostgreSQL e CouchDB.
 2. Exige variaveis de Couch no `.env`: `COUCHDB_SCHEME`, `COUCHDB_HOST`, `COUCHDB_PORT`, `COUCHDB_USER`, `COUCHDB_PASSWORD` (aliases `COUCH_*` tambem funcionam). Bancos default: `chcnpj_bcadastros_replica`, `chcpf_bcadastros_replica`, `chsn_bcadastros_replica`.
 3. Lista de CNPJs: por default `select cnpj from admcadapi.lista2_cnpjs`; altere via `CNPJ_LIST_QUERY` se precisar.
 4. Rode: `Rscript scripts/load_from_couch_cnpjs.R`\
-   - Para cada CNPJ, pega raiz (8) para cadastro e Simples, CNPJ completo para estabelecimento, grava o CPF do responsavel (se nao existir), carrega socios (distinguindo F/J/E via campo `tipo`), popula QSA (agora com `cpf_socio`/`cnpj_socio` separados) e atividades secundarias em tabela própria. Executa em BFS enfileirando socios PJ e contadores PJ referenciados. Usa commits por lote (`BATCH_COMMIT_SIZE`, default 50); pendencias de contador PJ e QSA são resolvidas a cada commit e no final.
+   - Para cada CNPJ, pega raiz (8) para cadastro e Simples, CNPJ completo para estabelecimento, grava o CPF do responsavel (se nao existir), carrega socios (distinguindo F/J/E via campo `tipo`), popula QSA (agora com `cpf_socio`/`cnpj_socio` separados) e atividades secundarias em tabela própria. Executa em BFS enfileirando socios PJ e contadores PJ referenciados. Usa consultas ao Couch em lote (`COUCH_BATCH_SIZE`, default 200) e commits por lote (`BATCH_COMMIT_SIZE`, default 50); pendencias de contador PJ e QSA são resolvidas a cada commit e no final.
 
 ## Proximos passos para CouchDB
 - Guarde design docs e arquivos auxiliares em `couchdb/design_docs`.

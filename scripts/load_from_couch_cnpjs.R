@@ -36,6 +36,12 @@ if (is.na(commit_size) || commit_size <= 0) {
 }
 write_log("BATCH_COMMIT_SIZE = ", commit_size)
 
+couch_batch_size <- suppressWarnings(as.integer(Sys.getenv("COUCH_BATCH_SIZE", "200")))
+if (is.na(couch_batch_size) || couch_batch_size <= 0) {
+  couch_batch_size <- 200
+}
+write_log("COUCH_BATCH_SIZE = ", couch_batch_size)
+
 one_chr <- function(x) {
   if (is.null(x) || length(x) == 0) return(NA_character_)
   as.character(x[[1]])
@@ -152,16 +158,78 @@ db_sn     <- Sys.getenv("COUCH_DB_SN",     unset = "chsn_bcadastros_replica")
 
 base_url <- sprintf("%s://%s:%s", couch_scheme, couch_host, couch_port)
 
+.couch_cache <- new.env(parent = emptyenv())
+
 couch_get <- function(db, id) {
+  key <- paste0(db, ":", id)
+  if (exists(key, envir = .couch_cache, inherits = FALSE)) {
+    return(get(key, envir = .couch_cache, inherits = FALSE))
+  }
   url <- sprintf("%s/%s/%s", base_url, db, id)
   resp <- httr::GET(url, httr::authenticate(couch_user, couch_pass), httr::timeout(30))
   if (httr::status_code(resp) == 200) {
-    jsonlite::fromJSON(httr::content(resp, as = "text", encoding = "UTF-8"))
+    doc <- jsonlite::fromJSON(httr::content(resp, as = "text", encoding = "UTF-8"))
   } else if (httr::status_code(resp) == 404) {
-    NULL
+    doc <- NULL
   } else {
     stop("Falha ao ler ", url, " (status ", httr::status_code(resp), ").")
   }
+  assign(key, doc, envir = .couch_cache)
+  doc
+}
+
+couch_get_bulk <- function(db, ids) {
+  ids <- unique(ids[!is.na(ids)])
+  if (length(ids) == 0) return(list())
+
+  # aproveita cache para o que já existe
+  out <- list()
+  missing <- character(0)
+  for (id in ids) {
+    key <- paste0(db, ":", id)
+    if (exists(key, envir = .couch_cache, inherits = FALSE)) {
+      out[[id]] <- get(key, envir = .couch_cache, inherits = FALSE)
+    } else {
+      missing <- c(missing, id)
+    }
+  }
+  if (length(missing) == 0) return(out)
+
+  url <- sprintf("%s/%s/_all_docs?include_docs=true", base_url, db)
+  body <- list(keys = missing)
+
+  resp <- httr::POST(
+    url,
+    body = jsonlite::toJSON(body, auto_unbox = TRUE),
+    encode = "json",
+    httr::content_type_json(),
+    httr::add_headers(Accept = "application/json"),
+    httr::authenticate(couch_user, couch_pass),
+    httr::timeout(60)
+  )
+
+  if (httr::status_code(resp) != 200) {
+    write_log("Bulk GET falhou (status ", httr::status_code(resp), "); fazendo fallback por ID.")
+    for (id in missing) {
+      out[[id]] <- couch_get(db, id)
+    }
+    return(out)
+  }
+
+  cont <- jsonlite::fromJSON(
+    httr::content(resp, as = "text", encoding = "UTF-8"),
+    simplifyVector = FALSE
+  )
+
+  for (row in cont$rows) {
+    if (!is.null(row$error) || is.null(row$doc)) {
+      assign(paste0(db, ":", row$id), NULL, envir = .couch_cache)
+      next
+    }
+    assign(paste0(db, ":", row$id), row$doc, envir = .couch_cache)
+    out[[row$id]] <- row$doc
+  }
+  out
 }
 
 cnpj_query <- Sys.getenv(
@@ -470,11 +538,43 @@ upsert_estabelecimento <- function(doc, cpf_contador_pf = NA_character_, contado
 calc_sn_flags <- function(periodos) {
   if (is.null(periodos) || length(periodos) == 0) return(list(ativo = "N", dt_ini = NA, dt_fim = NA))
   df <- jsonlite::fromJSON(jsonlite::toJSON(periodos, auto_unbox = TRUE))
+  if (is.null(df)) return(list(ativo = "N", dt_ini = NA, dt_fim = NA))
+  if (!is.data.frame(df)) df <- as.data.frame(df, stringsAsFactors = FALSE, check.names = FALSE)
   if (nrow(df) == 0 || !"Inicio" %in% names(df)) return(list(ativo = "N", dt_ini = NA, dt_fim = NA))
-  df$InicioDate <- as.Date(substr(df$Inicio, 1, 10))
-  df$FimDate <- if ("Fim" %in% names(df)) as.Date(substr(df$Fim, 1, 10)) else as.Date(NA)
-  df$Cancelado <- if (!"Cancelado" %in% names(df)) FALSE else df$Cancelado
-  df$Anulado <- if (!"Anulado" %in% names(df)) FALSE else df$Anulado
+
+  # Inicio pode vir como vetor simples ou list-column
+  inicio_vec <- vapply(seq_len(nrow(df)), function(i) {
+    if (!("Inicio" %in% names(df)) || length(df$Inicio) < i) return(NA_character_)
+    val <- df$Inicio[[i]]
+    if (is.null(val) || length(val) == 0) return(NA_character_)
+    substr(as.character(val[[1]]), 1, 10)
+  }, character(1))
+  df$InicioDate <- as.Date(inicio_vec)
+
+  fim_vec <- vapply(seq_len(nrow(df)), function(i) {
+    if (!"Fim" %in% names(df) || length(df$Fim) < i) return(NA_character_)
+    val <- df$Fim[[i]]
+    if (is.null(val) || length(val) == 0) return(NA_character_)
+    substr(as.character(val[[1]]), 1, 10)
+  }, character(1))
+  df$FimDate <- as.Date(fim_vec)
+
+  cancel_vec <- vapply(seq_len(nrow(df)), function(i) {
+    if (!"Cancelado" %in% names(df) || length(df$Cancelado) < i) return(FALSE)
+    val <- df$Cancelado[[i]]
+    if (is.null(val) || length(val) == 0) return(FALSE)
+    as.logical(val[[1]])
+  }, logical(1))
+  df$Cancelado <- cancel_vec
+
+  anulado_vec <- vapply(seq_len(nrow(df)), function(i) {
+    if (!"Anulado" %in% names(df) || length(df$Anulado) < i) return(FALSE)
+    val <- df$Anulado[[i]]
+    if (is.null(val) || length(val) == 0) return(FALSE)
+    as.logical(val[[1]])
+  }, logical(1))
+  df$Anulado <- anulado_vec
+
   df <- df[order(df$InicioDate), , drop = FALSE]
   ativo <- "N"
   dt_ini <- if (length(na.omit(df$InicioDate)) > 0) min(df$InicioDate, na.rm = TRUE) else NA
@@ -687,92 +787,106 @@ flush_batch <- function() {
 }
 
 while (length(queue) > 0) {
-  cnpj <- queue[1]
-  queue <- queue[-1]
-  if (cnpj %in% processed) next
-  processed <- c(processed, cnpj)
+  idxs  <- seq_len(min(couch_batch_size, length(queue)))
+  batch <- queue[idxs]
+  queue <- queue[-idxs]
 
-  write_log("Processando CNPJ", cnpj)
-  raiz <- substr(cnpj, 1, 8)
+  batch <- setdiff(batch, processed)
+  if (length(batch) == 0) next
 
-  cad_doc <- couch_get(db_cnpj, raiz)
-  est_doc <- couch_get(db_cnpj, cnpj)
-  sn_doc  <- couch_get(db_sn, raiz)
+  processed <- c(processed, batch)
+  write_log("Processando batch de ", length(batch), " CNPJs")
 
-  # garanta CPF do responsavel e contador PF antes de inserir FK
-  cpf_resp_safe <- NA_character_
-  cpf_contador_safe <- NA_character_
-  contador_pj_safe <- NA_character_
-  if (!is.null(cad_doc$cpfResponsavel)) {
-    cpf_resp_safe <- ensure_cpf(cad_doc$cpfResponsavel)
-    if (is.na(cpf_resp_safe)) write_log("CPF do responsavel nao inserido (nao encontrado ou falha de FK); FK no cadastro ficara NULL.")
-  }
-  if (!is.null(est_doc$contadorPF)) {
-    cpf_contador_safe <- ensure_cpf(est_doc$contadorPF)
-    if (is.na(cpf_contador_safe)) write_log("Contador PF nao encontrado/inserido para CNPJ ", cnpj, "; FK ficara NULL.")
-  }
-  if (!is.null(est_doc$contadorPJ)) {
-    contador_pj_safe <- pad(one_chr(est_doc$contadorPJ), 14)
-    if (!is.na(contador_pj_safe) && contador_pj_safe != cnpj) {
-      if (!estab_exists(contador_pj_safe) && !(contador_pj_safe %in% processed)) {
-        if (!(contador_pj_safe %in% queue)) {
-          write_log("Enfileirando contador PJ ", contador_pj_safe, " antes de carregar CNPJ ", cnpj)
-          queue <- c(queue, contador_pj_safe)
-        } else {
-          write_log("Contador PJ ", contador_pj_safe, " ja enfileirado.")
+  raizes <- substr(batch, 1, 8)
+  raizes_unicas <- unique(raizes)
+
+  cad_docs <- couch_get_bulk(db_cnpj, raizes_unicas)
+  est_docs <- couch_get_bulk(db_cnpj, batch)
+  sn_docs  <- couch_get_bulk(db_sn, raizes_unicas)
+
+  for (cnpj in batch) {
+    write_log("Processando CNPJ", cnpj)
+    raiz <- substr(cnpj, 1, 8)
+
+    cad_doc <- cad_docs[[raiz]]
+    est_doc <- est_docs[[cnpj]]
+    sn_doc  <- sn_docs[[raiz]]
+
+    # garanta CPF do responsavel e contador PF antes de inserir FK
+    cpf_resp_safe <- NA_character_
+    cpf_contador_safe <- NA_character_
+    contador_pj_safe <- NA_character_
+    if (!is.null(cad_doc) && !is.null(cad_doc$cpfResponsavel)) {
+      cpf_resp_safe <- ensure_cpf(cad_doc$cpfResponsavel)
+      if (is.na(cpf_resp_safe)) write_log("CPF do responsavel nao inserido (nao encontrado ou falha de FK); FK no cadastro ficara NULL.")
+    }
+    if (!is.null(est_doc) && !is.null(est_doc$contadorPF)) {
+      cpf_contador_safe <- ensure_cpf(est_doc$contadorPF)
+      if (is.na(cpf_contador_safe)) write_log("Contador PF nao encontrado/inserido para CNPJ ", cnpj, "; FK ficara NULL.")
+    }
+    if (!is.null(est_doc) && !is.null(est_doc$contadorPJ)) {
+      contador_pj_safe <- pad(one_chr(est_doc$contadorPJ), 14)
+      if (!is.na(contador_pj_safe) && contador_pj_safe != cnpj) {
+        if (!estab_exists(contador_pj_safe) && !(contador_pj_safe %in% processed)) {
+          if (!(contador_pj_safe %in% queue)) {
+            write_log("Enfileirando contador PJ ", contador_pj_safe, " antes de carregar CNPJ ", cnpj)
+            queue <- c(queue, contador_pj_safe)
+          } else {
+            write_log("Contador PJ ", contador_pj_safe, " ja enfileirado.")
+          }
+          pending_contador_pj[[length(pending_contador_pj) + 1]] <- list(num_cnpj = cnpj, contador_pj = contador_pj_safe)
+          contador_pj_safe <- NA_character_
         }
-        pending_contador_pj[[length(pending_contador_pj) + 1]] <- list(num_cnpj = cnpj, contador_pj = contador_pj_safe)
-        contador_pj_safe <- NA_character_
       }
     }
-  }
 
-  # 1) cadastro primeiro (FK de estabelecimento depende dele)
-  if (!is.null(cad_doc)) {
-    upsert_cadastro(cad_doc, cpf_responsavel = cpf_resp_safe)
-  } else {
-    write_log("Cadastro nao encontrado no Couch para raiz ", raiz, "; pulando estabelecimento/QSA para evitar erro de FK.")
-  }
-
-  # 2) estabelecimento (so se cadastro existe)
-  estab_ok <- FALSE
-  if (!is.null(est_doc)) {
+    # 1) cadastro primeiro (FK de estabelecimento depende dele)
     if (!is.null(cad_doc)) {
-      upsert_estabelecimento(est_doc, cpf_contador_pf = cpf_contador_safe, contador_pj_val = contador_pj_safe)
-      upsert_secundarias(est_doc, cnpj_full = cnpj)
-      estab_ok <- TRUE
+      upsert_cadastro(cad_doc, cpf_responsavel = cpf_resp_safe)
     } else {
-      write_log("Estabelecimento nao carregado porque o cadastro da raiz ", raiz, " nao existe na fonte.")
+      write_log("Cadastro nao encontrado no Couch para raiz ", raiz, "; pulando estabelecimento/QSA para evitar erro de FK.")
     }
-  } else {
-    write_log("Estabelecimento nao encontrado no Couch para CNPJ ", cnpj)
-  }
 
-  # 3) QSA so se cadastro/estab existem; enfileira socios PJ encontrados
-  if (!is.null(cad_doc) && estab_ok) {
-    res_soc <- processar_socios(cnpj_full = cnpj, socios = cad_doc$socios)
-    novos_cnpjs <- res_soc$novos_cnpjs
-    pending_qsa <- c(pending_qsa, res_soc$rows)
-    novos_cnpjs <- setdiff(unique(novos_cnpjs), c(processed, queue))
-    if (length(novos_cnpjs) > 0) {
-      write_log("Enfileirando socios PJ para carga: ", paste(novos_cnpjs, collapse = ", "))
-      queue <- c(queue, novos_cnpjs)
+    # 2) estabelecimento (so se cadastro existe)
+    estab_ok <- FALSE
+    if (!is.null(est_doc)) {
+      if (!is.null(cad_doc)) {
+        upsert_estabelecimento(est_doc, cpf_contador_pf = cpf_contador_safe, contador_pj_val = contador_pj_safe)
+        upsert_secundarias(est_doc, cnpj_full = cnpj)
+        estab_ok <- TRUE
+      } else {
+        write_log("Estabelecimento nao carregado porque o cadastro da raiz ", raiz, " nao existe na fonte.")
+      }
+    } else {
+      write_log("Estabelecimento nao encontrado no Couch para CNPJ ", cnpj)
     }
-  }
 
-  # 4) Simples Nacional (pode existir mesmo sem estab)
-  if (!is.null(sn_doc)) {
-    upsert_simples(sn_doc, raiz)
-  } else {
-    write_log("Documento de Simples/MEI nao encontrado para raiz ", raiz, " (empresa pode nunca ter optado).")
-  }
+    # 3) QSA so se cadastro/estab existem; enfileira socios PJ encontrados
+    if (!is.null(cad_doc) && estab_ok) {
+      res_soc <- processar_socios(cnpj_full = cnpj, socios = cad_doc$socios)
+      novos_cnpjs <- res_soc$novos_cnpjs
+      pending_qsa <- c(pending_qsa, res_soc$rows)
+      novos_cnpjs <- setdiff(unique(novos_cnpjs), c(processed, queue))
+      if (length(novos_cnpjs) > 0) {
+        write_log("Enfileirando socios PJ para carga: ", paste(novos_cnpjs, collapse = ", "))
+        queue <- c(queue, novos_cnpjs)
+      }
+    }
 
-  # tenta resolver contadores pendentes logo apos processar este CNPJ
-  resolve_contador_pj()
+    # 4) Simples Nacional (pode existir mesmo sem estab)
+    if (!is.null(sn_doc)) {
+      upsert_simples(sn_doc, raiz)
+    } else {
+      write_log("Documento de Simples/MEI nao encontrado para raiz ", raiz, " (empresa pode nunca ter optado).")
+    }
 
-  batch_count <- batch_count + 1
-  if (batch_count >= commit_size) {
-    flush_batch()
+    # tenta resolver contadores pendentes logo apos processar este CNPJ
+    resolve_contador_pj()
+
+    batch_count <- batch_count + 1
+    if (batch_count >= commit_size) {
+      flush_batch()
+    }
   }
 }
 
