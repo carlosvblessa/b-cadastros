@@ -874,11 +874,23 @@ while (length(queue) > 0) {
       }
     }
 
-    # 4) Simples Nacional (pode existir mesmo sem estab)
-    if (!is.null(sn_doc)) {
+    # 4) Simples Nacional / MEI
+    # Só grava se existir cadastro da raiz; se não houver cadastro,
+    # ignoramos o Simples para não violar FK e para manter consistência.
+    if (!is.null(sn_doc) && !is.null(cad_doc)) {
       upsert_simples(sn_doc, raiz)
+    } else if (!is.null(sn_doc) && is.null(cad_doc)) {
+      write_log(
+        "Simples/MEI encontrado no Couch para raiz ",
+        raiz,
+        " mas cadastro nao existe; ignorando Simples/MEI para evitar erro de FK."
+      )
     } else {
-      write_log("Documento de Simples/MEI nao encontrado para raiz ", raiz, " (empresa pode nunca ter optado).")
+      write_log(
+        "Documento de Simples/MEI nao encontrado para raiz ",
+        raiz,
+        " (empresa pode nunca ter optado)."
+      )
     }
 
     # tenta resolver contadores pendentes logo apos processar este CNPJ
