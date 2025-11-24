@@ -243,7 +243,7 @@ inner join admcadapi.cadastro cad on
 inner join admcadapi.cad_sefaz_pj sfz on
         cad.num_cnpj = sfz.num_cnpj
 where
-        cad.dt_ultima_atualizacao <= CURRENT_DATE - interval '16 days'
+        cad.dt_ultima_atualizacao <= CURRENT_DATE - interval '14 days'
     and
         (
                 (
