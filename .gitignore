@@ -9,3 +9,5 @@
 # Outros
 .DS_Store
 renv/library
+cnpjs.txt
+test*.sh
