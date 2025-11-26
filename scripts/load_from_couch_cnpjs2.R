@@ -23,7 +23,8 @@ con <- DBI::dbConnect(
   host = Sys.getenv("DB_HOST"),
   port = port,
   user = Sys.getenv("DB_USER"),
-  password = Sys.getenv("DB_PASSWORD")
+  password = Sys.getenv("DB_PASSWORD"),
+  timezone = "America/Maceio"
 )
 on.exit(DBI::dbDisconnect(con), add = TRUE)
 
