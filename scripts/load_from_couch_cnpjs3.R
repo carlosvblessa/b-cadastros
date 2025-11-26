@@ -232,44 +232,39 @@ couch_get_bulk <- function(db, ids) {
   out
 }
 
+
+
+# cnpj_query <- Sys.getenv(
+#   "CNPJ_LIST_QUERY",
+#   unset = "SELECT num_cnpj
+#   FROM admcadapi.cad_sefaz_pj c
+#   WHERE NOT EXISTS (
+#     SELECT 1
+#     FROM admb_cads.estabelecimento e
+#     WHERE e.num_cnpj = c.num_cnpj)
+#   offset 3000
+#   limit 1500
+#   "
+# )
+
 cnpj_query <- Sys.getenv(
   "CNPJ_LIST_QUERY",
-  unset = "select
-        cad.num_cnpj
-from
-        admods001.ods_cadastro obc
-inner join admcadapi.cadastro cad on
-        obc.num_cnpj = cad.num_cnpj
-inner join admcadapi.cad_sefaz_pj sfz on
-        cad.num_cnpj = sfz.num_cnpj
-where
-        cad.dt_ultima_atualizacao <= CURRENT_DATE - interval '14 days'
-    and
-        (
-                (
-        not (
-            (cad.dsc_situacao_cadastral_cnpj = 'ATIVA'
-                        and obc.dsc_situacao_cadastral = 'ATIVO')
-                        or
-            (cad.dsc_situacao_cadastral_cnpj = 'BAIXADO'
-                                and obc.dsc_situacao_cadastral = 'BAIXA')
-                        or
-            (cad.dsc_situacao_cadastral_cnpj = 'INAPTA'
-                                and obc.dsc_situacao_cadastral = 'INAPTO')
-                        or
-            (cad.dsc_situacao_cadastral_cnpj = 'SUSPENSA'
-                                and obc.dsc_situacao_cadastral = 'SUSPENSÃO')
-                        or
-            (cad.dsc_situacao_cadastral_cnpj = 'NULA'
-                                and obc.dsc_situacao_cadastral = 'NULA')
-                )
-        )
-        or
-                cad.dsc_situacao_cadastral_cnpj != sfz.dsc_situacao_cadastral_cnpj
-    )
-order by
-        cad.num_cnpj asc"
+  unset = "
+  select
+  	c.num_cnpj
+  from
+  	admcadapi.cadastro c
+  inner join admb_cads.estabelecimento e on 
+  	c.num_cnpj = e.num_cnpj
+  where
+  	e.data_carga  < '2025-11-25'
+  order by
+  	c.num_cnpj asc
+  offset 3000
+  limit 1500
+  "
 )
+
 
 # cnpj_query <- Sys.getenv(
 #   "CNPJ_LIST_QUERY",
@@ -378,6 +373,7 @@ upsert_cpf <- function(doc) {
     )
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
     ON CONFLICT (num_cpf) DO UPDATE SET
+      data_carga = clock_timestamp(),
       nom_pessoa = EXCLUDED.nom_pessoa,
       nom_social = EXCLUDED.nom_social,
       nom_mae = EXCLUDED.nom_mae,
@@ -452,6 +448,7 @@ upsert_cadastro <- function(doc, cpf_responsavel = NA_character_) {
     )
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
     ON CONFLICT (num_cnpj_raiz) DO UPDATE SET
+      data_carga = clock_timestamp(),
       nome_empresarial = EXCLUDED.nome_empresarial,
       natureza_juridica = EXCLUDED.natureza_juridica,
       porte_empresa = EXCLUDED.porte_empresa,
@@ -502,6 +499,7 @@ upsert_estabelecimento <- function(doc, cpf_contador_pf = NA_character_, contado
     )
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
     ON CONFLICT (num_cnpj) DO UPDATE SET
+      data_carga = clock_timestamp(),
       num_cnpj_raiz = EXCLUDED.num_cnpj_raiz,
       nome_fantasia = EXCLUDED.nome_fantasia,
       indicador_matriz = EXCLUDED.indicador_matriz,
@@ -632,6 +630,7 @@ upsert_simples <- function(doc, raiz) {
     )
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
     ON CONFLICT (num_cnpj_raiz) DO UPDATE SET
+      data_carga = clock_timestamp(),
       ind_simples_ativo = EXCLUDED.ind_simples_ativo,
       ind_mei_ativo = EXCLUDED.ind_mei_ativo,
       dat_opcao_simples = EXCLUDED.dat_opcao_simples,
@@ -755,7 +754,7 @@ resolve_contador_pj <- function() {
   for (lnk in pending_contador_pj) {
     if (estab_exists(lnk$contador_pj) && estab_exists(lnk$num_cnpj)) {
       sql_upd <- sprintf(
-        "UPDATE admb_cads.estabelecimento SET contador_pj = %s WHERE num_cnpj = %s",
+        "UPDATE admb_cads.estabelecimento SET contador_pj = %s, data_carga = clock_timestamp() WHERE num_cnpj = %s",
         DBI::dbQuoteString(con, lnk$contador_pj),
         DBI::dbQuoteString(con, lnk$num_cnpj)
       )
@@ -790,7 +789,8 @@ flush_batch <- function() {
           (num_cnpj, cpf_socio, cnpj_socio, qualificacao_socio, tipo_socio,
            cpf_representante, qualificacao_rep, data_entrada)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT DO NOTHING
+        ON CONFLICT ON CONSTRAINT qsa_pkey
+        DO UPDATE SET data_carga = clock_timestamp()
         ",
         q(row$num_cnpj),
         q(socio_cpf_val),
