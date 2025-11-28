@@ -5,10 +5,10 @@ Projeto para cadastros iniciais usando R, PostgreSQL e CouchDB.
 ## Estrutura
 - `scripts/setup_postgres.R`: cria/valida o schema e aplica todos os SQLs em `sql/postgres`.
 - `scripts/load_dominios_cnpj.R`: rotina de carga dos dominios CNPJ (mensal) a partir dos ZIPs da RFB, com controle de pastas e status.
-- `scripts/load_from_couch_cnpjs.R`: rotina de carga seletiva (CPF/CNPJ/SN) a partir dos bancos CouchDB para uma lista de CNPJs, com BFS para trazer socios PJ/contadores PJ referenciados e commits em lotes.
+- `scripts/load_from_couch_cnpjs.R`: rotina de carga seletiva (CPF/CNPJ/SN) a partir dos bancos CouchDB para uma lista de CNPJs, com BFS para trazer socios PJ/contadores PJ referenciados e commits em lotes. Ignora e loga QSA sem chave (CPF/CNPJ vazio) e faz upsert com `ON CONFLICT` alinhado aos índices únicos para não duplicar.
 - `sql/postgres/001_create_cadastros.sql`: define as tabelas de cadastro no schema `admb_cads` (o script cria o schema se houver permissao).
 - `sql/postgres/002_ctrl_carga_dominios.sql`: cria tabela de controle `admb_cads.ctrl_carga_dominios_cnpj`.
-- `sql/postgres/003_cadastro_pf_pj.sql`: cria estruturas de CPF, CNPJ (cadastro e estabelecimentos), QSA, Simples Nacional e atividades secundarias (FK de contador PJ já incluída).
+- `sql/postgres/003_cadastro_pf_pj.sql`: cria estruturas de CPF, CNPJ (cadastro e estabelecimentos), QSA, Simples Nacional e atividades secundarias (FK de contador PJ já incluída). Inclui índices únicos em QSA para evitar duplicidade de sócios PF/PJ por CNPJ.
 - `scripts/reprocess_simples_mei.R`: reprocessa Simples/MEI para corrigir inconsistencias de situacao (usa CouchDB `chsn_bcadastros_replica`).
 - `couchdb/`: espaco para configuracao de bancos e design docs do CouchDB.
 - `R/`: funcoes auxiliares que venham a ser compartilhadas entre os scripts R.
