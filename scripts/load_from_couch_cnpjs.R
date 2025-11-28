@@ -27,6 +27,8 @@ con <- DBI::dbConnect(
   timezone = "America/Maceio"
 )
 on.exit(DBI::dbDisconnect(con), add = TRUE)
+app_name <- Sys.getenv("DB_APP_NAME", unset = "load_couch_worker")
+try(DBI::dbExecute(con, sprintf("SET application_name = %s", DBI::dbQuoteString(con, app_name))), silent = TRUE)
 
 write_log <- function(...) cat(format(Sys.time()), "-", ..., "\n")
 `%||%` <- function(a, b) if (!is.null(a) && length(a) > 0) a else b
@@ -143,8 +145,10 @@ parse_date_iso <- function(x) {
 }
 make_phone <- function(ddd, tel) {
   ddd <- dig(ddd); tel <- dig(tel)
-  if (!nzchar(tel)) return(NA_character_)
-  if (nzchar(ddd)) paste0("(", ddd, ") ", tel) else tel
+  ddd <- if (length(ddd) == 0) NA_character_ else ddd[1]
+  tel <- if (length(tel) == 0) NA_character_ else tel[1]
+  if (is.na(tel) || !nzchar(tel)) return(NA_character_)
+  if (!is.na(ddd) && nzchar(ddd)) paste0("(", ddd, ") ", tel) else tel
 }
 
 couch_scheme <- Sys.getenv("COUCHDB_SCHEME", unset = Sys.getenv("COUCH_SCHEME", "http"))
@@ -233,64 +237,59 @@ couch_get_bulk <- function(db, ids) {
   out
 }
 
-# cnpj_query <- Sys.getenv(
-#   "CNPJ_LIST_QUERY",
-#   unset = "SELECT num_cnpj 
-#   FROM admcadapi.cad_sefaz_pj c
-#   WHERE NOT EXISTS (
-#     SELECT 1
-#     FROM admb_cads.estabelecimento e
-#     WHERE e.num_cnpj = c.num_cnpj) limit 1500"
-# )
+args <- commandArgs(trailingOnly = TRUE)
+arg_get <- function(flag, default = NULL) {
+  hit <- which(args == flag)
+  if (length(hit) == 1 && hit < length(args)) return(args[hit + 1])
+  default
+}
+has_flag <- function(flag) any(args == flag)
+parse_bool <- function(x, default = TRUE) {
+  if (is.null(x) || length(x) == 0) return(default)
+  x <- tolower(trimws(as.character(x[1])))
+  if (x %in% c("1", "true", "t", "yes", "y", "sim", "s")) return(TRUE)
+  if (x %in% c("0", "false", "f", "no", "n", "nao", "não")) return(FALSE)
+  default
+}
 
-cnpj_query <- Sys.getenv(
-  "CNPJ_LIST_QUERY",
-  unset = "
-  select
-  	c.num_cnpj
-  from
-  	admcadapi.cadastro c
-  inner join admb_cads.estabelecimento e on 
-  	c.num_cnpj = e.num_cnpj
-  where
-  	e.data_carga  < '2025-11-25'
-  order by
-  	c.num_cnpj asc
-  limit 1500
-  "
+read_sql_file <- function(path) paste(readLines(path, warn = FALSE), collapse = "\n")
+
+sql_file <- arg_get("--sql-file", Sys.getenv("CNPJ_LIST_SQL_FILE", "sql/cnpjs_pendentes.sql"))
+cutoff_date <- arg_get("--cutoff", Sys.getenv("CUTOFF_DATE", "2025-11-25"))
+limit_n <- suppressWarnings(as.integer(arg_get("--limit", Sys.getenv("CNPJ_LIMIT", "1500"))))
+poll_seconds <- suppressWarnings(as.numeric(arg_get("--poll", Sys.getenv("POLL_SECONDS", "2"))))
+max_empty_rounds <- suppressWarnings(as.integer(arg_get("--max-empty", Sys.getenv("MAX_EMPTY_ROUNDS", "3"))))
+run_loop <- parse_bool(arg_get("--loop", Sys.getenv("RUN_LOOP", "true")), default = TRUE)
+if (has_flag("--once")) run_loop <- FALSE
+
+if (is.na(limit_n) || limit_n <= 0) limit_n <- 1500
+if (is.na(poll_seconds) || poll_seconds < 0) poll_seconds <- 2
+if (is.na(max_empty_rounds) || max_empty_rounds <= 0) max_empty_rounds <- 3
+
+load_cnpj_query <- function() {
+  env_query <- Sys.getenv("CNPJ_LIST_QUERY", unset = NA_character_)
+  if (file.exists(sql_file)) {
+    sql_txt <- read_sql_file(sql_file)
+    sql_txt <- gsub("\\{\\{CUTOFF_DATE\\}\\}", cutoff_date, sql_txt)
+    sql_txt <- gsub("\\{\\{LIMIT\\}\\}", as.character(limit_n), sql_txt)
+    return(sql_txt)
+  }
+  if (!is.na(env_query) && nzchar(trimws(env_query))) {
+    return(env_query)
+  }
+  stop("Informe um SQL para a lista de CNPJs via --sql-file ou CNPJ_LIST_QUERY.")
+}
+
+cnpj_query <- load_cnpj_query()
+sql_source <- if (file.exists(sql_file)) sql_file else "CNPJ_LIST_QUERY"
+write_log(
+  "SQL origem: ", sql_source,
+  " | limit=", limit_n,
+  " | cutoff=", cutoff_date,
+  " | poll=", poll_seconds, "s",
+  " | max_empty=", max_empty_rounds,
+  " | loop=", run_loop
 )
-
-
-# cnpj_query <- Sys.getenv(
-#   "CNPJ_LIST_QUERY",
-#   unset = "select distinct num_cnpj from admcadapi.qsa limit 100"
-# )
-
-# cnpj_query <- Sys.getenv(
-#   "CNPJ_LIST_QUERY",
-#   unset = "SELECT num_cnpj
-# FROM (
-#     VALUES
-#         ('00002121000172'),
-#         ('00005275000118'),
-#         ('00028682000140'),
-#         ('00059822000229'),
-#         ('00063960012298'),
-#         ('00063960056074'),
-#         ('00063960056317')
-# ) AS lista(num_cnpj)"
-# )
-
-
-cnpj_list <- tryCatch(
-  DBI::dbGetQuery(con, cnpj_query),
-  error = function(e) stop("Erro ao buscar lista de CNPJs: ", e$message)
-)
-if (nrow(cnpj_list) == 0) stop("Nenhum CNPJ encontrado na consulta: ", cnpj_query)
-col_cnpj <- names(cnpj_list)[1]
-cnpjs <- pad(cnpj_list[[col_cnpj]], 14)
-
-if (any(is.na(cnpjs))) stop("CNPJs invalidos na lista (nao numericos ou tamanho diferente de 14).")
 
 cpf_exists <- function(cpf) {
   res <- DBI::dbGetQuery(con, "select 1 from admb_cads.cad_cpf where num_cpf = $1 limit 1", params = list(cpf))
@@ -334,21 +333,20 @@ upsert_secundarias <- function(doc, cnpj_full) {
   secs <- stringr::str_trim(as.character(secs))
   secs <- secs[nzchar(secs)]
   DBI::dbExecute(con, "DELETE FROM admb_cads.atividades_secundarias WHERE num_cnpj = $1", params = list(cnpj_full))
-  if (length(secs) > 0) {
-    for (cnae in secs) {
-      cnae_val <- ensure_fk("cad_atividades", "num_atv", cnae)
-      if (is.na(cnae_val)) next
-      DBI::dbExecute(
-        con,
-        sprintf(
-          "INSERT INTO admb_cads.atividades_secundarias (num_cnpj, cnae_secundaria) VALUES (%s, %s)",
-          DBI::dbQuoteString(con, cnpj_full),
-          DBI::dbQuoteString(con, cnae_val)
-        ),
-        immediate = TRUE
-      )
-    }
-  }
+  if (length(secs) == 0) return(invisible(TRUE))
+
+  sec_csv <- paste(secs, collapse = ",")
+  DBI::dbExecute(
+    con,
+    "
+    INSERT INTO admb_cads.atividades_secundarias (num_cnpj, cnae_secundaria)
+    SELECT $1, a.num_atv
+    FROM unnest(string_to_array($2, ',')) s(cnae)
+    JOIN admb_cads.cad_atividades a ON a.num_atv = s.cnae
+    ",
+    params = list(cnpj_full, sec_csv)
+  )
+  TRUE
 }
 
 upsert_cpf <- function(doc) {
@@ -717,6 +715,10 @@ processar_socios <- function(cnpj_full, socios) {
     qual_rep <- socio_row$qualificacaoRepresentanteLegal %||% socio_row$qualificacaoRepLegal %||% NA_character_
     data_ent <- parse_date_ymd(socio_row$dataEntradaSociedade %||% socio_row$dataEntrada)
 
+    if (is.na(socio_cpf) && is.na(socio_cnpj)) {
+      next
+    }
+
     rows[[length(rows) + 1]] <- list(
       num_cnpj = cnpj_full,
       cpf_socio = socio_cpf,
@@ -735,201 +737,304 @@ processar_socios <- function(cnpj_full, socios) {
   list(novos_cnpjs = unique(novos_cnpjs), rows = rows)
 }
 
-# Processamento em BFS com commits por tamanho de lote
-pending_qsa <- list()
-queue <- unique(cnpjs)
-processed <- character(0)
-pending_contador_pj <- list()
-batch_count <- 0
-DBI::dbBegin(con)
-
-resolve_contador_pj <- function() {
-  if (length(pending_contador_pj) == 0) return()
-  remaining <- list()
-  for (lnk in pending_contador_pj) {
-    if (estab_exists(lnk$contador_pj) && estab_exists(lnk$num_cnpj)) {
-      sql_upd <- sprintf(
-        "UPDATE admb_cads.estabelecimento SET contador_pj = %s, data_carga = clock_timestamp() WHERE num_cnpj = %s",
-        DBI::dbQuoteString(con, lnk$contador_pj),
-        DBI::dbQuoteString(con, lnk$num_cnpj)
-      )
-      DBI::dbExecute(con, sql_upd, immediate = TRUE)
-      write_log("Atualizado contador PJ ", lnk$contador_pj, " para estab ", lnk$num_cnpj)
-    } else {
-      remaining[[length(remaining) + 1]] <- lnk
-    }
-  }
-  pending_contador_pj <<- remaining
-}
-
-flush_batch <- function() {
-  # tenta resolver contadores pendentes que ja existem
-  resolve_contador_pj()
-
-  # insere QSA pendente (somente se as dependencias existem)
-  if (length(pending_qsa) > 0) {
-    for (row in pending_qsa) {
-      socio_cpf_val <- if (!is.na(row$cpf_socio)) ensure_cpf(row$cpf_socio) else NA_character_
-      socio_cnpj_val <- if (!is.na(row$cnpj_socio)) pad(row$cnpj_socio, 14) else NA_character_
-
-      if (!is.na(socio_cnpj_val) && !estab_exists(socio_cnpj_val)) {
-        # ainda nao existe o PJ do socio; deixa para a proxima
-        next
-      }
-
-      q <- function(val) if (is.na(val) || length(val) == 0) "NULL" else DBI::dbQuoteString(con, val)
-      sql_qsa <- sprintf(
-        "
-        INSERT INTO admb_cads.qsa
-          (num_cnpj, cpf_socio, cnpj_socio, qualificacao_socio, tipo_socio,
-           cpf_representante, qualificacao_rep, data_entrada)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT ON CONSTRAINT qsa_pkey
-        DO UPDATE SET data_carga = clock_timestamp()
-        ",
-        q(row$num_cnpj),
-        q(socio_cpf_val),
-        q(socio_cnpj_val),
-        q(row$qual_socio),
-        q(row$tipo_socio),
-        q(ensure_cpf(row$cpf_rep)),
-        q(row$qual_rep),
-        if (is.na(row$data_ent) || length(row$data_ent) == 0) "NULL" else DBI::dbQuoteString(con, as.character(row$data_ent))
-      )
-      DBI::dbExecute(con, sql_qsa, immediate = TRUE)
-    }
-    # remove os que foram inseridos (dependencia resolvida)
-    pending_qsa <<- Filter(function(r) {
-      socio_cnpj_val <- if (!is.na(r$cnpj_socio)) pad(r$cnpj_socio, 14) else NA_character_
-      !is.na(socio_cnpj_val) && !estab_exists(socio_cnpj_val)
-    }, pending_qsa)
-  }
-
-  DBI::dbCommit(con)
+processar_um_lote <- function() {
+  committed <- FALSE
   DBI::dbBegin(con)
-  batch_count <<- 0
-  write_log("Commit aplicado; pendentes contador_pj=", length(pending_contador_pj), ", pendentes QSA=", length(pending_qsa))
-}
+  on.exit({
+    if (!committed) try(DBI::dbRollback(con), silent = TRUE)
+  }, add = TRUE)
 
-while (length(queue) > 0) {
-  idxs  <- seq_len(min(couch_batch_size, length(queue)))
-  batch <- queue[idxs]
-  queue <- queue[-idxs]
+  cnpj_list <- tryCatch(
+    DBI::dbGetQuery(con, cnpj_query),
+    error = function(e) stop("Erro ao buscar lista de CNPJs: ", e$message)
+  )
+  if (nrow(cnpj_list) == 0) {
+    DBI::dbCommit(con)
+    committed <- TRUE
+    return(0L)
+  }
 
-  batch <- setdiff(batch, processed)
-  if (length(batch) == 0) next
+  col_cnpj <- names(cnpj_list)[1]
+  cnpjs <- pad(cnpj_list[[col_cnpj]], 14)
+  if (any(is.na(cnpjs))) {
+    DBI::dbRollback(con)
+    stop("CNPJs invalidos na lista (nao numericos ou tamanho diferente de 14).")
+  }
 
-  processed <- c(processed, batch)
-  write_log("Processando batch de ", length(batch), " CNPJs")
+  commit_size_old <- commit_size
+  commit_size <<- length(cnpjs)
+  on.exit({ commit_size <<- commit_size_old }, add = TRUE)
 
-  raizes <- substr(batch, 1, 8)
-  raizes_unicas <- unique(raizes)
+  write_log("Lote iniciado com ", length(cnpjs), " CNPJs (commit_size ajustado ao lote).")
 
-  cad_docs <- couch_get_bulk(db_cnpj, raizes_unicas)
-  est_docs <- couch_get_bulk(db_cnpj, batch)
-  sn_docs  <- couch_get_bulk(db_sn, raizes_unicas)
+  pending_qsa <- list()
+  seeds <- unique(cnpjs)
+  queue <- seeds
+  processed <- character(0)
+  pending_contador_pj <- list()
+  batch_count <- 0L
+  seed_env <- new.env(hash = TRUE, parent = emptyenv())
+  for (x in seeds) assign(x, TRUE, envir = seed_env)
+  seed_left <- length(seeds)
 
-  for (cnpj in batch) {
-    write_log("Processando CNPJ", cnpj)
-    raiz <- substr(cnpj, 1, 8)
-
-    cad_doc <- cad_docs[[raiz]]
-    est_doc <- est_docs[[cnpj]]
-    sn_doc  <- sn_docs[[raiz]]
-
-    # garanta CPF do responsavel e contador PF antes de inserir FK
-    cpf_resp_safe <- NA_character_
-    cpf_contador_safe <- NA_character_
-    contador_pj_safe <- NA_character_
-    if (!is.null(cad_doc) && !is.null(cad_doc$cpfResponsavel)) {
-      cpf_resp_safe <- ensure_cpf(cad_doc$cpfResponsavel)
-      if (is.na(cpf_resp_safe)) write_log("CPF do responsavel nao inserido (nao encontrado ou falha de FK); FK no cadastro ficara NULL.")
-    }
-    if (!is.null(est_doc) && !is.null(est_doc$contadorPF)) {
-      cpf_contador_safe <- ensure_cpf(est_doc$contadorPF)
-      if (is.na(cpf_contador_safe)) write_log("Contador PF nao encontrado/inserido para CNPJ ", cnpj, "; FK ficara NULL.")
-    }
-    if (!is.null(est_doc) && !is.null(est_doc$contadorPJ)) {
-      contador_pj_safe <- pad(one_chr(est_doc$contadorPJ), 14)
-      if (!is.na(contador_pj_safe) && contador_pj_safe != cnpj) {
-        if (!estab_exists(contador_pj_safe) && !(contador_pj_safe %in% processed)) {
-          if (!(contador_pj_safe %in% queue)) {
-            write_log("Enfileirando contador PJ ", contador_pj_safe, " antes de carregar CNPJ ", cnpj)
-            queue <- c(queue, contador_pj_safe)
-          } else {
-            write_log("Contador PJ ", contador_pj_safe, " ja enfileirado.")
-          }
-          pending_contador_pj[[length(pending_contador_pj) + 1]] <- list(num_cnpj = cnpj, contador_pj = contador_pj_safe)
-          contador_pj_safe <- NA_character_
-        }
-      }
-    }
-
-    # 1) cadastro primeiro (FK de estabelecimento depende dele)
-    if (!is.null(cad_doc)) {
-      upsert_cadastro(cad_doc, cpf_responsavel = cpf_resp_safe)
-    } else {
-      write_log("Cadastro nao encontrado no Couch para raiz ", raiz, "; pulando estabelecimento/QSA para evitar erro de FK.")
-    }
-
-    # 2) estabelecimento (so se cadastro existe)
-    estab_ok <- FALSE
-    if (!is.null(est_doc)) {
-      if (!is.null(cad_doc)) {
-        upsert_estabelecimento(est_doc, cpf_contador_pf = cpf_contador_safe, contador_pj_val = contador_pj_safe)
-        upsert_secundarias(est_doc, cnpj_full = cnpj)
-        estab_ok <- TRUE
+  resolve_contador_pj <- function() {
+    if (length(pending_contador_pj) == 0) return()
+    remaining <- list()
+    for (lnk in pending_contador_pj) {
+      if (estab_exists(lnk$contador_pj) && estab_exists(lnk$num_cnpj)) {
+        sql_upd <- sprintf(
+          "UPDATE admb_cads.estabelecimento SET contador_pj = %s, data_carga = clock_timestamp() WHERE num_cnpj = %s",
+          DBI::dbQuoteString(con, lnk$contador_pj),
+          DBI::dbQuoteString(con, lnk$num_cnpj)
+        )
+        DBI::dbExecute(con, sql_upd, immediate = TRUE)
+        write_log("Atualizado contador PJ ", lnk$contador_pj, " para estab ", lnk$num_cnpj)
       } else {
-        write_log("Estabelecimento nao carregado porque o cadastro da raiz ", raiz, " nao existe na fonte.")
-      }
-    } else {
-      write_log("Estabelecimento nao encontrado no Couch para CNPJ ", cnpj)
-    }
-
-    # 3) QSA so se cadastro/estab existem; enfileira socios PJ encontrados
-    if (!is.null(cad_doc) && estab_ok) {
-      res_soc <- processar_socios(cnpj_full = cnpj, socios = cad_doc$socios)
-      novos_cnpjs <- res_soc$novos_cnpjs
-      pending_qsa <- c(pending_qsa, res_soc$rows)
-      novos_cnpjs <- setdiff(unique(novos_cnpjs), c(processed, queue))
-      if (length(novos_cnpjs) > 0) {
-        write_log("Enfileirando socios PJ para carga: ", paste(novos_cnpjs, collapse = ", "))
-        queue <- c(queue, novos_cnpjs)
+        remaining[[length(remaining) + 1]] <- lnk
       }
     }
+    pending_contador_pj <<- remaining
+  }
 
-    # 4) Simples Nacional / MEI
-    # Só grava se existir cadastro da raiz; se não houver cadastro,
-    # ignoramos o Simples para não violar FK e para manter consistência.
-    if (!is.null(sn_doc) && !is.null(cad_doc)) {
-      upsert_simples(sn_doc, raiz)
-    } else if (!is.null(sn_doc) && is.null(cad_doc)) {
-      write_log(
-        "Simples/MEI encontrado no Couch para raiz ",
-        raiz,
-        " mas cadastro nao existe; ignorando Simples/MEI para evitar erro de FK."
-      )
-    } else {
-      write_log(
-        "Documento de Simples/MEI nao encontrado para raiz ",
-        raiz,
-        " (empresa pode nunca ter optado)."
-      )
-    }
-
-    # tenta resolver contadores pendentes logo apos processar este CNPJ
+  flush_batch <- function(final = FALSE) {
     resolve_contador_pj()
 
-    batch_count <- batch_count + 1
-    if (batch_count >= commit_size) {
-      flush_batch()
+    if (length(pending_qsa) > 0) {
+      for (row in pending_qsa) {
+        socio_cpf_val <- if (!is.na(row$cpf_socio)) ensure_cpf(row$cpf_socio) else NA_character_
+        socio_cnpj_val <- if (!is.na(row$cnpj_socio)) pad(row$cnpj_socio, 14) else NA_character_
+
+        if (is.na(socio_cpf_val) && is.na(socio_cnpj_val)) {
+          write_log("Pulando QSA sem chave (num_cnpj=", row$num_cnpj, ").")
+          next
+        }
+
+        if (!is.na(socio_cnpj_val) && !estab_exists(socio_cnpj_val)) {
+          next
+        }
+
+        conflict_sql <- if (!is.na(socio_cpf_val)) {
+          "
+          ON CONFLICT (num_cnpj, cpf_socio) WHERE cpf_socio IS NOT NULL
+          DO UPDATE SET
+            cpf_socio = EXCLUDED.cpf_socio,
+            cnpj_socio = EXCLUDED.cnpj_socio,
+            qualificacao_socio = EXCLUDED.qualificacao_socio,
+            tipo_socio = EXCLUDED.tipo_socio,
+            cpf_representante = EXCLUDED.cpf_representante,
+            qualificacao_rep = EXCLUDED.qualificacao_rep,
+            data_entrada = EXCLUDED.data_entrada,
+            data_carga = clock_timestamp()"
+        } else if (!is.na(socio_cnpj_val)) {
+          "
+          ON CONFLICT (num_cnpj, cnpj_socio) WHERE cnpj_socio IS NOT NULL
+          DO UPDATE SET
+            cpf_socio = EXCLUDED.cpf_socio,
+            cnpj_socio = EXCLUDED.cnpj_socio,
+            qualificacao_socio = EXCLUDED.qualificacao_socio,
+            tipo_socio = EXCLUDED.tipo_socio,
+            cpf_representante = EXCLUDED.cpf_representante,
+            qualificacao_rep = EXCLUDED.qualificacao_rep,
+            data_entrada = EXCLUDED.data_entrada,
+            data_carga = clock_timestamp()"
+        } else {
+          "ON CONFLICT DO NOTHING"
+        }
+
+        q <- function(val) if (is.na(val) || length(val) == 0) "NULL" else DBI::dbQuoteString(con, val)
+        sql_qsa <- sprintf(
+          "
+          INSERT INTO admb_cads.qsa
+            (num_cnpj, cpf_socio, cnpj_socio, qualificacao_socio, tipo_socio,
+             cpf_representante, qualificacao_rep, data_entrada)
+          VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+          %s
+          ",
+          q(row$num_cnpj),
+          q(socio_cpf_val),
+          q(socio_cnpj_val),
+          q(row$qual_socio),
+          q(row$tipo_socio),
+          q(ensure_cpf(row$cpf_rep)),
+          q(row$qual_rep),
+          if (is.na(row$data_ent) || length(row$data_ent) == 0) "NULL" else DBI::dbQuoteString(con, as.character(row$data_ent)),
+          conflict_sql
+        )
+        DBI::dbExecute(con, sql_qsa, immediate = TRUE)
+      }
+      pending_qsa <<- Filter(function(r) {
+        socio_cnpj_val <- if (!is.na(r$cnpj_socio)) pad(r$cnpj_socio, 14) else NA_character_
+        !is.na(socio_cnpj_val) && !estab_exists(socio_cnpj_val)
+      }, pending_qsa)
+    }
+
+    DBI::dbCommit(con)
+    if (!final) {
+      DBI::dbBegin(con)
+    }
+    batch_count <<- 0L
+    write_log(
+      "Commit aplicado; pendentes contador_pj=",
+      length(pending_contador_pj),
+      ", pendentes QSA=",
+      length(pending_qsa)
+    )
+  }
+
+  while (length(queue) > 0) {
+    idxs  <- seq_len(min(couch_batch_size, length(queue)))
+    batch <- queue[idxs]
+    queue <- queue[-idxs]
+
+    batch <- setdiff(batch, processed)
+    if (length(batch) == 0) next
+
+    processed <- c(processed, batch)
+    write_log("Processando batch de ", length(batch), " CNPJs")
+
+    raizes <- substr(batch, 1, 8)
+    raizes_unicas <- unique(raizes)
+
+    cad_docs <- couch_get_bulk(db_cnpj, raizes_unicas)
+    est_docs <- couch_get_bulk(db_cnpj, batch)
+    sn_docs  <- couch_get_bulk(db_sn, raizes_unicas)
+
+    for (cnpj in batch) {
+      if (exists(cnpj, envir = seed_env, inherits = FALSE)) {
+        rm(list = cnpj, envir = seed_env)
+        seed_left <- seed_left - 1L
+      }
+
+      DBI::dbExecute(con, "SAVEPOINT sp_cnpj")
+      ok <- tryCatch({
+        write_log("Processando CNPJ ", cnpj)
+        raiz <- substr(cnpj, 1, 8)
+
+        cad_doc <- cad_docs[[raiz]]
+        est_doc <- est_docs[[cnpj]]
+        sn_doc  <- sn_docs[[raiz]]
+
+        cpf_resp_safe <- NA_character_
+        cpf_contador_safe <- NA_character_
+        contador_pj_safe <- NA_character_
+        if (!is.null(cad_doc) && !is.null(cad_doc$cpfResponsavel)) {
+          cpf_resp_safe <- ensure_cpf(cad_doc$cpfResponsavel)
+          if (is.na(cpf_resp_safe)) write_log("CPF do responsavel nao inserido (nao encontrado ou falha de FK); FK no cadastro ficara NULL.")
+        }
+        if (!is.null(est_doc) && !is.null(est_doc$contadorPF)) {
+          cpf_contador_safe <- ensure_cpf(est_doc$contadorPF)
+          if (is.na(cpf_contador_safe)) write_log("Contador PF nao encontrado/inserido para CNPJ ", cnpj, "; FK ficara NULL.")
+        }
+        if (!is.null(est_doc) && !is.null(est_doc$contadorPJ)) {
+          contador_pj_safe <- pad(one_chr(est_doc$contadorPJ), 14)
+          if (!is.na(contador_pj_safe) && contador_pj_safe != cnpj) {
+            if (!estab_exists(contador_pj_safe) && !(contador_pj_safe %in% processed)) {
+              if (!(contador_pj_safe %in% queue)) {
+                write_log("Enfileirando contador PJ ", contador_pj_safe, " antes de carregar CNPJ ", cnpj)
+                queue <- c(queue, contador_pj_safe)
+              } else {
+                write_log("Contador PJ ", contador_pj_safe, " ja enfileirado.")
+              }
+              pending_contador_pj[[length(pending_contador_pj) + 1]] <- list(num_cnpj = cnpj, contador_pj = contador_pj_safe)
+              contador_pj_safe <- NA_character_
+            }
+          }
+        }
+
+        if (!is.null(cad_doc)) {
+          upsert_cadastro(cad_doc, cpf_responsavel = cpf_resp_safe)
+        } else {
+          write_log("Cadastro nao encontrado no Couch para raiz ", raiz, "; pulando estabelecimento/QSA para evitar erro de FK.")
+        }
+
+        estab_ok <- FALSE
+        if (!is.null(est_doc)) {
+          if (!is.null(cad_doc)) {
+            upsert_estabelecimento(est_doc, cpf_contador_pf = cpf_contador_safe, contador_pj_val = contador_pj_safe)
+            upsert_secundarias(est_doc, cnpj_full = cnpj)
+            estab_ok <- TRUE
+          } else {
+            write_log("Estabelecimento nao carregado porque o cadastro da raiz ", raiz, " nao existe na fonte.")
+          }
+        } else {
+          write_log("Estabelecimento nao encontrado no Couch para CNPJ ", cnpj)
+        }
+
+        if (!is.null(cad_doc) && estab_ok) {
+          res_soc <- processar_socios(cnpj_full = cnpj, socios = cad_doc$socios)
+          novos_cnpjs <- res_soc$novos_cnpjs
+          pending_qsa <- c(pending_qsa, res_soc$rows)
+          novos_cnpjs <- setdiff(unique(novos_cnpjs), c(processed, queue))
+          if (length(novos_cnpjs) > 0) {
+            write_log("Enfileirando socios PJ para carga: ", paste(novos_cnpjs, collapse = ", "))
+            queue <- c(queue, novos_cnpjs)
+          }
+        }
+
+        if (!is.null(sn_doc) && !is.null(cad_doc)) {
+          upsert_simples(sn_doc, raiz)
+        } else if (!is.null(sn_doc) && is.null(cad_doc)) {
+          write_log(
+            "Simples/MEI encontrado no Couch para raiz ",
+            raiz,
+            " mas cadastro nao existe; ignorando Simples/MEI para evitar erro de FK."
+          )
+        } else {
+          write_log(
+            "Documento de Simples/MEI nao encontrado para raiz ",
+            raiz,
+            " (empresa pode nunca ter optado)."
+          )
+        }
+
+        resolve_contador_pj()
+
+        batch_count <- batch_count + 1L
+        do_flush <- batch_count >= commit_size && seed_left == 0L
+        TRUE
+      }, error = function(e) {
+        write_log("ERRO no CNPJ ", cnpj, ": ", e$message)
+        DBI::dbExecute(con, "ROLLBACK TO SAVEPOINT sp_cnpj")
+        FALSE
+      })
+      DBI::dbExecute(con, "RELEASE SAVEPOINT sp_cnpj")
+      if (exists("do_flush") && isTRUE(do_flush)) {
+        flush_batch()
+        do_flush <- FALSE
+      }
+      if (!ok) next
     }
   }
+
+  flush_batch(final = TRUE)
+  committed <- TRUE
+
+  rm(list = ls(.couch_cache, all.names = TRUE), envir = .couch_cache)
+
+  length(cnpjs)
 }
 
-# flush final para pendencias restantes
-if (batch_count > 0 || length(pending_contador_pj) > 0 || length(pending_qsa) > 0) {
-  flush_batch()
-}
+empty_rounds <- 0L
+if (!run_loop) {
+  n <- processar_um_lote()
+  if (n == 0L) write_log("Sem CNPJs no momento (execucao unica).")
+  else write_log("Lote finalizado (execucao unica): ", n, " CNPJs")
+  write_log("Fim.")
+  quit(status = 0)
+} else {
+  repeat {
+    n <- processar_um_lote()
 
-write_log("Carga via CouchDB finalizada. Processados: ", length(processed), " CNPJs (incluindo socios PJ enfileirados). QSA inserido apos dependencia.")
+    if (n == 0L) {
+      empty_rounds <- empty_rounds + 1L
+      write_log("Sem CNPJs no momento (", empty_rounds, "/", max_empty_rounds, ")")
+      if (empty_rounds >= max_empty_rounds) break
+      Sys.sleep(poll_seconds)
+    } else {
+      empty_rounds <- 0L
+      write_log("Lote finalizado: ", n, " CNPJs")
+    }
+  }
+
+  write_log("Fim: nao ha mais trabalho pelo SELECT.")
+}

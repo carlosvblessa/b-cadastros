@@ -101,6 +101,15 @@ CREATE TABLE IF NOT EXISTS admb_cads.qsa (
   data_carga         timestamptz DEFAULT now()
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_qsa_pf
+  ON admb_cads.qsa (num_cnpj, cpf_socio)
+  WHERE cpf_socio IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_qsa_pj
+  ON admb_cads.qsa (num_cnpj, cnpj_socio)
+  WHERE cnpj_socio IS NOT NULL;
+
+
 -- ===================================================================
 -- Atividades Secundarias (b-Cadastros CNPJ)
 -- ===================================================================

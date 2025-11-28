@@ -248,15 +248,15 @@ cnpj_query <- Sys.getenv(
   "CNPJ_LIST_QUERY",
   unset = "
   select
-  	c.num_cnpj
+        c.num_cnpj
   from
-  	admcadapi.cadastro c
+        admcadapi.cad_sefaz_pj c
   inner join admb_cads.estabelecimento e on 
-  	c.num_cnpj = e.num_cnpj
+        c.num_cnpj = e.num_cnpj
   where
-  	e.data_carga  < '2025-11-25'
+        e.data_carga  < '2025-11-25'
   order by
-  	c.num_cnpj desc
+        c.num_cnpj desc
   limit 1500
   "
 )
@@ -717,6 +717,10 @@ processar_socios <- function(cnpj_full, socios) {
     qual_rep <- socio_row$qualificacaoRepresentanteLegal %||% socio_row$qualificacaoRepLegal %||% NA_character_
     data_ent <- parse_date_ymd(socio_row$dataEntradaSociedade %||% socio_row$dataEntrada)
 
+    if (is.na(socio_cpf) && is.na(socio_cnpj)) {
+      next
+    }
+
     rows[[length(rows) + 1]] <- list(
       num_cnpj = cnpj_full,
       cpf_socio = socio_cpf,
@@ -772,9 +776,42 @@ flush_batch <- function() {
       socio_cpf_val <- if (!is.na(row$cpf_socio)) ensure_cpf(row$cpf_socio) else NA_character_
       socio_cnpj_val <- if (!is.na(row$cnpj_socio)) pad(row$cnpj_socio, 14) else NA_character_
 
+      if (is.na(socio_cpf_val) && is.na(socio_cnpj_val)) {
+        write_log("Pulando QSA sem chave (num_cnpj=", row$num_cnpj, ").")
+        next
+      }
+
       if (!is.na(socio_cnpj_val) && !estab_exists(socio_cnpj_val)) {
         # ainda nao existe o PJ do socio; deixa para a proxima
         next
+      }
+
+      conflict_sql <- if (!is.na(socio_cpf_val)) {
+        "
+        ON CONFLICT (num_cnpj, cpf_socio) WHERE cpf_socio IS NOT NULL
+        DO UPDATE SET
+          cpf_socio = EXCLUDED.cpf_socio,
+          cnpj_socio = EXCLUDED.cnpj_socio,
+          qualificacao_socio = EXCLUDED.qualificacao_socio,
+          tipo_socio = EXCLUDED.tipo_socio,
+          cpf_representante = EXCLUDED.cpf_representante,
+          qualificacao_rep = EXCLUDED.qualificacao_rep,
+          data_entrada = EXCLUDED.data_entrada,
+          data_carga = clock_timestamp()"
+      } else if (!is.na(socio_cnpj_val)) {
+        "
+        ON CONFLICT (num_cnpj, cnpj_socio) WHERE cnpj_socio IS NOT NULL
+        DO UPDATE SET
+          cpf_socio = EXCLUDED.cpf_socio,
+          cnpj_socio = EXCLUDED.cnpj_socio,
+          qualificacao_socio = EXCLUDED.qualificacao_socio,
+          tipo_socio = EXCLUDED.tipo_socio,
+          cpf_representante = EXCLUDED.cpf_representante,
+          qualificacao_rep = EXCLUDED.qualificacao_rep,
+          data_entrada = EXCLUDED.data_entrada,
+          data_carga = clock_timestamp()"
+      } else {
+        "ON CONFLICT DO NOTHING"
       }
 
       q <- function(val) if (is.na(val) || length(val) == 0) "NULL" else DBI::dbQuoteString(con, val)
@@ -784,8 +821,7 @@ flush_batch <- function() {
           (num_cnpj, cpf_socio, cnpj_socio, qualificacao_socio, tipo_socio,
            cpf_representante, qualificacao_rep, data_entrada)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT ON CONSTRAINT qsa_pkey
-        DO UPDATE SET data_carga = clock_timestamp()
+        %s
         ",
         q(row$num_cnpj),
         q(socio_cpf_val),
@@ -794,7 +830,8 @@ flush_batch <- function() {
         q(row$tipo_socio),
         q(ensure_cpf(row$cpf_rep)),
         q(row$qual_rep),
-        if (is.na(row$data_ent) || length(row$data_ent) == 0) "NULL" else DBI::dbQuoteString(con, as.character(row$data_ent))
+        if (is.na(row$data_ent) || length(row$data_ent) == 0) "NULL" else DBI::dbQuoteString(con, as.character(row$data_ent)),
+        conflict_sql
       )
       DBI::dbExecute(con, sql_qsa, immediate = TRUE)
     }
