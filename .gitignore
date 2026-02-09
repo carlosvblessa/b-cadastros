@@ -10,4 +10,8 @@
 .DS_Store
 renv/library
 cnpjs.txt
-test*.sh
+inserir*.py
+*.csv
+*.sh
+*.*json*
+*.txt
