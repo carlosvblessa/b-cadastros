@@ -1,6 +1,6 @@
 SELECT
   c.num_cnpj
-FROM admcadapi.cadastro c
+FROM admcadapi.cad_sefaz_pj c
 JOIN admb_cads.estabelecimento e
   ON e.num_cnpj = c.num_cnpj
 WHERE
