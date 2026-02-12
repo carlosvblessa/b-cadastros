@@ -18,7 +18,7 @@
 | `cpfResponsavel`                                                 | `NUM_DOC_RESP`                | Copiar como string (CPF), preservando zeros à esquerda.                                                    |
 | *(fixo)*                                                         | `COD_TIPDOC_RESP`             | Preencher com `'CPF'`                                                      |
 | `cpfResponsavel`                                                 | `NOM_RAZAO_SOCIAL_RESP`       | Consultar b-cadastros por CPF e preencher com o nome (aplicar `TO_UPPER`).                                 |
-| `ORACLE`                                                         | `QTD_EMPRESAS_RESP`           | ORACLE                                                                                                     |
+| `cpfResponsavel` + consulta b-cadastros                         | `QTD_EMPRESAS_RESP`           | **Consultar Regra I (abaixo)**                                                                             |
 | `ETL`                                                            | `IND_RESP`                    | ETL                                                                                                        |
 | `ETL`                                                            | `IND_NOTEIRA`                 | ETL                                                                                                        |
 | `PeriodoSimples`                                                 | `IND_OPCAO_SIMPLES`           | **Consultar Regra A (abaixo)**                                                                             |
@@ -353,3 +353,60 @@ Para preencher `NOM_RAZAO_SOCIAL_CONT`, **é necessário consultar o b-cadastros
 
 **Exemplo:** se `socios` tiver 3 itens -> `QTD_SOCIO_RAIZ = 3`. Consulte raiz 29091109 para ver a estrutura de `socios`.
 
+## Regra I - Cálculo de `QTD_EMPRESAS_RESP` via b-cadastros (`cpfResponsavel`)
+
+**Objetivo:** preencher `QTD_EMPRESAS_RESP` com a quantidade de **empresas raiz (CNPJ 8)** associadas ao CPF do responsável.
+
+1. Entrada: `cpfResponsavel` (ou `NUM_DOC_RESP` já normalizado para 11 dígitos).
+2. Consultar o banco de CNPJ do b-cadastros (`chcnpj_bcadastros_replica`) via `/_find`, usando:
+   * `selector: { cpfResponsavel: "<CPF>" }`
+   * índice `idx-cpf-responsavel`
+   * `fields: ["_id"]` (não trazer payload completo)
+3. Somar `length(docs)` de todas as páginas (`bookmark`).
+4. Resultado final:
+   * se não houver retorno -> `QTD_EMPRESAS_RESP = 0`
+   * caso contrário -> `QTD_EMPRESAS_RESP = total_docs`
+
+**Exemplo resumido com `curl` (com paginação):**
+
+```bash
+CPF="05282545454"
+BASE_URL="http://<host>:<port>"
+DB_CNPJ="chcnpj_bcadastros_replica"
+USER="<usuario>"
+PASS="<senha>"
+LIMIT=1000
+bookmark=""
+total=0
+
+while :; do
+  if [ -n "$bookmark" ]; then
+    BODY="$(jq -n \
+      --arg cpf "$CPF" \
+      --arg bm "$bookmark" \
+      --argjson lim "$LIMIT" \
+      '{selector:{cpfResponsavel:$cpf}, use_index:["_design/idx_cpf_responsavel","idx-cpf-responsavel"], fields:["_id"], limit:$lim, bookmark:$bm}')"
+  else
+    BODY="$(jq -n \
+      --arg cpf "$CPF" \
+      --argjson lim "$LIMIT" \
+      '{selector:{cpfResponsavel:$cpf}, use_index:["_design/idx_cpf_responsavel","idx-cpf-responsavel"], fields:["_id"], limit:$lim}')"
+  fi
+
+  resp="$(curl -sS -u "$USER:$PASS" \
+    -H "Content-Type: application/json" \
+    -d "$BODY" \
+    "$BASE_URL/$DB_CNPJ/_find")"
+
+  qtd="$(echo "$resp" | jq '.docs // [] | length')"
+  total=$((total + qtd))
+  novo_bm="$(echo "$resp" | jq -r '.bookmark // ""')"
+
+  [ "$qtd" -lt "$LIMIT" ] && break
+  [ -z "$novo_bm" ] && break
+  [ "$novo_bm" = "$bookmark" ] && break
+  bookmark="$novo_bm"
+done
+
+echo "$total"
+```
