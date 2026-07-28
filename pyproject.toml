@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68,<76", "wheel>=0.42,<1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bcadastros-etl"
+version = "0.1.0"
+description = "Extracao e transformacao cadastral do CouchDB para JSONL/Pentaho"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+license = {text = "Proprietary"}
+authors = [{name = "SEFAZ/AL"}]
+dependencies = [
+  "python-dotenv>=1.0,<2",
+  "requests>=2.31,<3",
+  "simplejson>=3.19,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.11,<2",
+  "pytest>=8.2,<9",
+  "pytest-cov>=5,<7",
+  "ruff>=0.6,<1",
+  "types-requests>=2.31,<3",
+]
+
+[project.scripts]
+bcadastros-etl = "bcadastros_etl.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bcadastros_etl*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "integration: teste de integracao sem dependencia de servico externo",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["bcadastros_etl"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = "simplejson"
+ignore_missing_imports = true

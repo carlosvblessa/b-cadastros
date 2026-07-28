@@ -1,17 +1,54 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.whl
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+
 # R
 .Rhistory
 .RData
-.Rproj.user
+.Rproj.user/
+renv/library/
 
-# Ambiente
+# Ambiente e segredos
 .env
+.env.*
+!.env.example
 
-# Outros
-.DS_Store
-renv/library
+# Saidas locais do ETL
+*.log
+*.jsonl
+*.ndjson
+erros*.json
+resultado*.json
+temp/
+*.tmp
+*.bak
+
+# Massas locais legadas
 cnpjs.txt
 inserir*.py
 *.csv
 *.sh
-*.*json*
 *.txt
+
+# Exemplos versionados
+!requirements*.txt
+!examples/*.txt
+!examples/*.jsonl
+
+# Sistema operacional e editor
+.DS_Store
+.idea/
+.vscode/
