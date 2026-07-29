@@ -148,15 +148,17 @@ class CouchDBConfig:
     @classmethod
     def from_env(
         cls,
-        dotenv_path: str | os.PathLike[str] | None = None,
+        dotenv_path: str | os.PathLike[str] | None = ".env",
     ) -> CouchDBConfig:
         """Load and validate configuration from environment variables.
 
-        An env file is read only when explicitly provided. This avoids coupling
-        production execution to the process working directory.
+        By default, ``.env`` is loaded from the current working directory when
+        the file exists. Values already exported by the process take
+        precedence. Passing ``None`` disables dotenv loading.
 
         Args:
-            dotenv_path: Optional explicit path to a dotenv file.
+            dotenv_path: Dotenv path, ``.env`` by default, or ``None`` to use
+                only the process environment.
 
         Returns:
             Fully validated immutable configuration.
@@ -166,9 +168,10 @@ class CouchDBConfig:
         """
         if dotenv_path is not None:
             env_file = Path(dotenv_path).expanduser()
-            if not env_file.is_file():
+            if env_file.is_file():
+                load_dotenv(dotenv_path=env_file, override=False)
+            elif env_file != Path(".env"):
                 raise ConfigurationError(f"arquivo de ambiente nao encontrado: {env_file}")
-            load_dotenv(dotenv_path=env_file, override=False)
 
         base_url = _base_url_from_env()
         username = _required_text(

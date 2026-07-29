@@ -69,7 +69,7 @@ def test_config_accepts_base_url_and_controlled_values(
     monkeypatch.setenv("COUCHDB_VERIFY_SSL", "false")
     monkeypatch.setenv("LOG_LEVEL", "debug")
 
-    config = CouchDBConfig.from_env()
+    config = CouchDBConfig.from_env(None)
     assert config.base_url == "https://couch.test:6984"
     assert config.timeout == 12.5
     assert config.max_attempts == 4
@@ -86,7 +86,7 @@ def test_config_keeps_connection_legacy_aliases(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("COUCH_USER", "etl")
     monkeypatch.setenv("COUCH_PASS", "secret")
 
-    config = CouchDBConfig.from_env()
+    config = CouchDBConfig.from_env(None)
     assert config.base_url == "http://legacy.test:15984"
     assert config.cnpj_database == "chcnpj_bcadastros_replica"
 
@@ -117,7 +117,7 @@ def test_config_rejects_invalid_values(
     _set_minimal_environment(monkeypatch)
     monkeypatch.setenv(name, value)
     with pytest.raises(ConfigurationError, match=name):
-        CouchDBConfig.from_env()
+        CouchDBConfig.from_env(None)
 
 
 @pytest.mark.parametrize("port", ["0", "65536", "texto"])
@@ -131,7 +131,7 @@ def test_config_validates_component_port(
     monkeypatch.setenv("COUCHDB_USER", "etl")
     monkeypatch.setenv("COUCHDB_PASSWORD", "secret")
     with pytest.raises(ConfigurationError, match="COUCHDB_PORT"):
-        CouchDBConfig.from_env()
+        CouchDBConfig.from_env(None)
 
 
 def test_config_validates_port_inside_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,7 +139,7 @@ def test_config_validates_port_inside_url(monkeypatch: pytest.MonkeyPatch) -> No
     _set_minimal_environment(monkeypatch)
     monkeypatch.setenv("COUCHDB_URL", "http://couch.test:70000")
     with pytest.raises(ConfigurationError, match="porta"):
-        CouchDBConfig.from_env()
+        CouchDBConfig.from_env(None)
 
 
 @pytest.mark.parametrize(
@@ -165,7 +165,7 @@ def test_config_rejects_required_whitespace(
         monkeypatch.setenv("COUCHDB_PASSWORD", "secret")
     monkeypatch.setenv(name, value)
     with pytest.raises(ConfigurationError, match=name):
-        CouchDBConfig.from_env()
+        CouchDBConfig.from_env(None)
 
 
 @pytest.mark.parametrize(
@@ -185,7 +185,7 @@ def test_config_accepts_zero_and_rejects_negative_cache_limits(
     _clean_environment(monkeypatch)
     _set_minimal_environment(monkeypatch)
     monkeypatch.setenv(name, "0")
-    config = CouchDBConfig.from_env()
+    config = CouchDBConfig.from_env(None)
     assert 0 in {
         config.cache_root_maxsize,
         config.cache_simples_maxsize,
@@ -196,7 +196,7 @@ def test_config_accepts_zero_and_rejects_negative_cache_limits(
 
     monkeypatch.setenv(name, "-1")
     with pytest.raises(ConfigurationError, match=name):
-        CouchDBConfig.from_env()
+        CouchDBConfig.from_env(None)
 
 
 def test_workers_environment_and_default_precedence(
@@ -204,20 +204,20 @@ def test_workers_environment_and_default_precedence(
 ) -> None:
     _clean_environment(monkeypatch)
     _set_minimal_environment(monkeypatch)
-    assert CouchDBConfig.from_env().workers == 4
+    assert CouchDBConfig.from_env(None).workers == 4
 
     monkeypatch.setenv("WORKERS", "8")
-    assert CouchDBConfig.from_env().workers == 8
+    assert CouchDBConfig.from_env(None).workers == 8
 
 
 def test_config_requires_host_and_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     _clean_environment(monkeypatch)
     with pytest.raises(ConfigurationError, match="COUCHDB_HOST"):
-        CouchDBConfig.from_env()
+        CouchDBConfig.from_env(None)
 
     monkeypatch.setenv("COUCHDB_URL", "http://couch.test:5984")
     with pytest.raises(ConfigurationError, match="COUCHDB_USER"):
-        CouchDBConfig.from_env()
+        CouchDBConfig.from_env(None)
 
 
 def test_config_rejects_credentials_inside_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,10 +226,45 @@ def test_config_rejects_credentials_inside_url(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("COUCHDB_USER", "etl")
     monkeypatch.setenv("COUCHDB_PASSWORD", "secret")
     with pytest.raises(ConfigurationError, match="nao inclua credenciais"):
-        CouchDBConfig.from_env()
+        CouchDBConfig.from_env(None)
 
 
-def test_config_loads_only_explicit_env_file(
+def test_config_loads_default_env_file_from_current_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _clean_environment(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "COUCHDB_URL=http://default-file.test:5984\n"
+        "COUCHDB_USER=etl\n"
+        "COUCHDB_PASSWORD=secret\n"
+        "WORKERS=8\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    config = CouchDBConfig.from_env()
+    assert config.base_url == "http://default-file.test:5984"
+    assert config.workers == 8
+    for name in ("COUCHDB_URL", "COUCHDB_USER", "COUCHDB_PASSWORD", "WORKERS"):
+        os.environ.pop(name, None)
+
+
+def test_config_uses_process_environment_when_default_file_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _clean_environment(monkeypatch)
+    _set_minimal_environment(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    config = CouchDBConfig.from_env()
+    assert config.base_url == "http://couch.test:5984"
+    assert config.workers == 4
+
+
+def test_config_loads_explicit_env_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:

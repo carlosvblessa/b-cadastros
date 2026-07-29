@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--env-file",
         metavar="ARQUIVO",
-        help="arquivo dotenv explicito; por padrao usa apenas o ambiente do processo",
+        help="arquivo dotenv; por padrao le .env do diretorio atual",
     )
     parser.add_argument(
         "--log-level",

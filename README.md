@@ -70,13 +70,23 @@ cliente Oracle, framework web, biblioteca assíncrona ou cache externo.
 
 ## Configuração
 
-Em produção, prefira variáveis de ambiente fornecidas pelo orquestrador. Um arquivo
-dotenv só é lido quando indicado explicitamente; assim, a execução não depende do
-diretório corrente:
+Por padrão, a aplicação carrega `.env` do diretório corrente quando o arquivo existe.
+Variáveis já exportadas pelo processo têm precedência sobre o arquivo. Se `.env` não
+existir, a aplicação continua usando somente as variáveis do ambiente.
 
 ```bash
-cp .env.example config.env
+cp .env.example .env
 
+python -m bcadastros_etl \
+  --input /dados/cnpjs.txt \
+  --output /dados/resultado.jsonl \
+  --errors /dados/erros.jsonl
+```
+
+Quando o processo for iniciado por Pentaho ou por outro diretório, informe um caminho
+explícito para não depender do diretório corrente:
+
+```bash
 python -m bcadastros_etl \
   --env-file /caminho/absoluto/config.env \
   --input /dados/cnpjs.txt \
