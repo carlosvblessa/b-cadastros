@@ -27,6 +27,11 @@ def couch_config() -> CouchDBConfig:
         responsible_index_name="idx-cpf-responsavel",
         cpf_id_prefix="",
         log_level="INFO",
+        cache_root_maxsize=4,
+        cache_simples_maxsize=4,
+        cache_person_maxsize=4,
+        cache_accountant_maxsize=4,
+        cache_responsible_count_maxsize=4,
     )
 
 

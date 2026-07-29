@@ -28,6 +28,7 @@ from bcadastros_etl.transformers import (
     [
         (None, "N"),
         ("", "N"),
+        (True, "N"),
         ({}, "N"),
         ({"Inicio": "2025-01-01", "Fim": None}, "S"),
         ({"Inicio": " 2025-01-01 ", "Fim": "  "}, "S"),
@@ -142,9 +143,7 @@ def test_rule_g_prioritizes_masked_pj_and_uses_pj_uf() -> None:
 
 
 def test_rule_g_selects_pf_when_pj_is_empty() -> None:
-    selected = rule_g(
-        {"contadorPJ": " ", "contadorPF": "012.345.678-90", "ufCrcContadorPF": "al"}
-    )
+    selected = rule_g({"contadorPJ": " ", "contadorPF": "012.345.678-90", "ufCrcContadorPF": "al"})
     assert selected.document == "01234567890"
     assert selected.document_type == "CPF"
     assert selected.source == "PF"
@@ -154,9 +153,28 @@ def test_rule_g_selects_pf_when_pj_is_empty() -> None:
 def test_rule_g_handles_absent_and_invalid_accountant() -> None:
     assert rule_g({}).document is None
     selected = rule_g({"contadorPJ": "123", "ufCrcContadorPJ": ""})
-    assert selected.document == "123"
+    assert selected.document is None
     assert selected.document_type is None
+    assert selected.source == "PJ"
     assert selected.outside_al is None
+
+
+def test_rule_g_accepts_alphanumeric_pj_and_rejects_alphanumeric_pf() -> None:
+    selected_pj = rule_g(
+        {
+            "contadorPJ": "ab.345.678/000a-08",
+            "contadorPF": "111.222.333-44",
+            "ufCrcContadorPJ": "AL",
+        }
+    )
+    assert selected_pj.document == "AB345678000A08"
+    assert selected_pj.document_type == "CNPJ"
+    assert selected_pj.source == "PJ"
+
+    selected_pf = rule_g({"contadorPF": "111.222.33A-44"})
+    assert selected_pf.document is None
+    assert selected_pf.document_type is None
+    assert selected_pf.source == "PF"
 
 
 def test_rule_h_counts_lists_and_warns_on_unexpected_type(
@@ -173,6 +191,7 @@ def test_rule_h_counts_lists_and_warns_on_unexpected_type(
 def test_document_text_date_and_capital_helpers() -> None:
     assert normalize_document("012.345.678-90", 11) == "01234567890"
     assert normalize_document("123", 11) is None
+    assert normalize_document("012.345.67A-90", 11) is None
     assert normalize_text("  José da Silva  ") == "JOSÉ DA SILVA"
     assert normalize_text(" USUARIO@EXEMPLO.COM ", lowercase=True) == "usuario@exemplo.com"
     assert normalize_text("   ") is None
@@ -182,6 +201,7 @@ def test_document_text_date_and_capital_helpers() -> None:
     assert parse_capital_social("00000001800000") == Decimal("18000.00")
     assert parse_capital_social("") is None
     assert parse_capital_social("18,00") is None
+    assert parse_capital_social(True) is None
 
 
 def test_build_record_has_stable_complete_fields_and_normalization() -> None:
@@ -225,3 +245,24 @@ def test_build_record_has_stable_complete_fields_and_normalization() -> None:
     assert data["DTH_TERMINO_CNPJ"] == "2025-12-31T00:00:00"
     assert data["COD_CNAE"] == "4789005"
     assert data["QTD_SOCIO_RAIZ"] == 2
+
+
+def test_build_record_uses_fixed_responsible_document_type_when_absent() -> None:
+    record = build_record(
+        "AA345678000329",
+        {
+            "nomeEmpresarial": "Empresa alfanumérica",
+            "cpfResponsavel": None,
+            "capitalSocial": None,
+            "porteEmpresa": None,
+        },
+        {"indicadorMatriz": "0"},
+        None,
+        responsible_name=None,
+        responsible_company_count=0,
+        accountant_name=None,
+        partner_count=0,
+    )
+    assert record.NUM_CNPJ == "AA345678000329"
+    assert record.NUM_DOC_RESP is None
+    assert record.COD_TIPDOC_RESP == "CPF"

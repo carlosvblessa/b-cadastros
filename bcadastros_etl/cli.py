@@ -24,6 +24,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the public command-line parser."""
     parser = argparse.ArgumentParser(
         prog="python -m bcadastros_etl",
         description="Extrai dados cadastrais do CouchDB e gera JSON Lines para o Pentaho.",
@@ -40,7 +41,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="arquivo JSONL de saida; '-' escreve em stdout (padrao)",
     )
     parser.add_argument("--errors", metavar="ARQUIVO", help="JSONL opcional de erros isolados")
-    parser.add_argument("--workers", type=int, help="sobrescreve COUCHDB_WORKERS")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        help="sobrescreve WORKERS; o padrao e 4",
+    )
+    parser.add_argument(
+        "--env-file",
+        metavar="ARQUIVO",
+        help="arquivo dotenv explicito; por padrao usa apenas o ambiente do processo",
+    )
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
@@ -81,15 +91,32 @@ def _open_output(path: str, stack: ExitStack) -> TextIO:
 
 
 def execute(args: argparse.Namespace) -> int:
+    """Execute a parsed command and return its successful exit code.
+
+    Args:
+        args: Namespace produced by :func:`build_parser`.
+
+    Returns:
+        Zero after a structurally successful batch, including isolated errors.
+
+    Raises:
+        ConfigurationError: If arguments or environment settings are invalid.
+        OSError: If an input or output stream cannot be opened or written.
+    """
     _validate_paths(args.input, args.output, args.errors)
-    config = CouchDBConfig.from_env()
+    config = (
+        CouchDBConfig.from_env(args.env_file)
+        if args.env_file is not None
+        else CouchDBConfig.from_env()
+    )
     if args.workers is not None:
-        if args.workers <= 0:
+        if isinstance(args.workers, bool) or not isinstance(args.workers, int) or args.workers <= 0:
             raise ConfigurationError("--workers deve ser inteiro positivo")
         config = replace(config, workers=args.workers)
     if args.log_level is not None:
         config = replace(config, log_level=args.log_level)
     configure_logging(config.log_level)
+    LOGGER.info("Inicio do processamento: workers=%d", config.workers)
 
     with ExitStack() as stack:
         input_stream = _read_input(args.input, stack)
@@ -98,14 +125,27 @@ def execute(args: argparse.Namespace) -> int:
         error_stream = _open_output(args.errors, stack) if args.errors else None
 
         with CouchDBClient(config) as client:
-            stats = run_pipeline(
-                cnpjs,
-                input_errors,
-                CadastroExtractor(client),
-                JsonlWriter(output_stream),
-                JsonlWriter(error_stream) if error_stream is not None else None,
-                workers=config.workers,
-            )
+            try:
+                stats = run_pipeline(
+                    cnpjs,
+                    input_errors,
+                    CadastroExtractor(client),
+                    JsonlWriter(output_stream),
+                    JsonlWriter(error_stream) if error_stream is not None else None,
+                    workers=config.workers,
+                )
+            finally:
+                for cache_name, metrics in client.cache_metrics().items():
+                    LOGGER.info(
+                        "Cache %s: hits=%d misses=%d inclusoes=%d remocoes=%d tamanho=%d maximo=%d",
+                        cache_name,
+                        metrics.hits,
+                        metrics.misses,
+                        metrics.insertions,
+                        metrics.evictions,
+                        metrics.current_size,
+                        metrics.max_size,
+                    )
 
     LOGGER.info(
         "Processamento concluido: recebidos=%d escritos=%d erros=%d",
@@ -117,6 +157,15 @@ def execute(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the CLI and translate structural failures into exit codes.
+
+    Args:
+        argv: Optional arguments without the executable name.
+
+    Returns:
+        ``0`` for a completed batch, ``2`` for known structural failures, or
+        ``3`` for unexpected structural failures.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     configure_logging("INFO")

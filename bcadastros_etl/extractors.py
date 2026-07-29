@@ -1,10 +1,10 @@
-"""Orquestracao das consultas necessarias para montar um registro cadastral."""
+"""Orchestrate CouchDB queries required for one cadastral record."""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
-from typing import Any
+from collections.abc import Callable
+from typing import TypeVar
 
 from .couchdb_client import CouchDBClient
 from .models import (
@@ -12,97 +12,121 @@ from .models import (
     DocumentNotFoundError,
     RecordProcessingError,
 )
-from .transformers import build_record, is_filled, normalize_document, rule_g
+from .normalization import normalize_numeric_document
+from .transformers import build_record, is_filled, rule_g
 
 LOGGER = logging.getLogger(__name__)
+QueryResultT = TypeVar("QueryResultT")
 
 
 class CadastroExtractor:
+    """Extract and transform one normalized CNPJ using reusable client data."""
+
     def __init__(self, client: CouchDBClient) -> None:
+        """Initialize the extractor.
+
+        Args:
+            client: Shared thread-safe CouchDB client.
+        """
         self.client = client
 
     @staticmethod
     def _query(
         stage: str,
-        operation: Callable[[], Mapping[str, Any] | None],
+        operation: Callable[[], QueryResultT | None],
         *,
         required: bool = False,
-    ) -> Mapping[str, Any] | None:
+    ) -> QueryResultT | None:
+        """Run one query and attach record-stage context to any failure."""
         try:
-            document = operation()
+            result = operation()
         except Exception as exc:
             raise RecordProcessingError(stage, exc) from exc
-        if required and document is None:
+        if required and result is None:
             error = DocumentNotFoundError("Documento nao encontrado no b-cadastros")
             raise RecordProcessingError(stage, error)
-        return document
+        return result
 
     def extract(self, cnpj: str) -> CadastroRecord:
+        """Extract a complete record or raise an isolatable processing error.
+
+        Args:
+            cnpj: Normalized 14-position numeric or alphanumeric CNPJ.
+
+        Returns:
+            Fully transformed output record.
+
+        Raises:
+            RecordProcessingError: If a required document, HTTP operation, or
+                complete Rule I pagination fails for this CNPJ.
+        """
         root_id = cnpj[:8]
         root = self._query(
             "consulta_cnpj_raiz",
-            lambda: self.client.get_cnpj_document(root_id),
+            lambda: self.client.get_root_projection(root_id),
             required=True,
         )
         establishment = self._query(
             "consulta_cnpj",
-            lambda: self.client.get_cnpj_document(cnpj),
+            lambda: self.client.get_establishment_document(cnpj),
             required=True,
         )
         simples = self._query(
             "consulta_simples_mei",
-            lambda: self.client.get_simples_document(root_id),
+            lambda: self.client.get_simples_projection(root_id),
         )
         assert root is not None
         assert establishment is not None
 
-        responsible_name: Any = None
+        responsible_name: str | None = None
         responsible_company_count = 0
-        responsible_raw = root.get("cpfResponsavel")
-        responsible_document = normalize_document(responsible_raw, 11)
+        responsible_raw = root.responsible_cpf
+        responsible_document = normalize_numeric_document(responsible_raw, 11)
         if responsible_document:
-            person = self._query(
+            responsible_name = self._query(
                 "consulta_responsavel",
-                lambda: self.client.get_cpf_document(responsible_document),
+                lambda: self.client.get_person_name(responsible_document),
             )
-            if person is not None:
-                responsible_name = person.get("nomeContribuinte")
-            try:
-                responsible_company_count = self.client.count_companies_for_responsible(
-                    responsible_document
-                )
-            except Exception as exc:
-                raise RecordProcessingError("quantidade_empresas_responsavel", exc) from exc
+            responsible_company_count_result = self._query(
+                "quantidade_empresas_responsavel",
+                lambda: self.client.count_companies_for_responsible(responsible_document),
+                required=True,
+            )
+            assert responsible_company_count_result is not None
+            responsible_company_count = responsible_company_count_result
         elif is_filled(responsible_raw):
-            LOGGER.warning("cpfResponsavel ignorado por nao possuir 11 digitos no CNPJ %s", cnpj)
+            LOGGER.warning(
+                "cpfResponsavel ignorado por nao possuir 11 digitos no CNPJ %s",
+                cnpj,
+            )
 
-        accountant_name: Any = None
+        accountant_name: str | None = None
         accountant = rule_g(establishment)
-        if accountant.document_type == "CNPJ" and accountant.document is not None:
-            accountant_document_id = accountant.document
-            accountant_document = self._query(
-                "consulta_contador_pj",
-                lambda: self.client.get_cnpj_document(accountant_document_id[:8]),
+        if accountant.document_type is not None and accountant.document is not None:
+            accountant_type = accountant.document_type
+            accountant_document = accountant.document
+            stage = "consulta_contador_pj" if accountant_type == "CNPJ" else "consulta_contador_pf"
+            accountant_name = self._query(
+                stage,
+                lambda: self.client.get_accountant_name(
+                    accountant_type,
+                    accountant_document,
+                ),
             )
-            if accountant_document is not None:
-                accountant_name = accountant_document.get("nomeEmpresarial")
-        elif accountant.document_type == "CPF" and accountant.document is not None:
-            accountant_document_id = accountant.document
-            accountant_document = self._query(
-                "consulta_contador_pf",
-                lambda: self.client.get_cpf_document(accountant_document_id),
+        elif accountant.source is not None:
+            LOGGER.warning(
+                "Documento de contador %s invalido no CNPJ %s",
+                accountant.source,
+                cnpj,
             )
-            if accountant_document is not None:
-                accountant_name = accountant_document.get("nomeContribuinte")
-        elif accountant.document is not None:
-            LOGGER.warning("Documento de contador com tamanho invalido no CNPJ %s", cnpj)
 
         return build_record(
             cnpj,
-            root,
+            root.to_mapping(),
             establishment,
-            simples,
+            simples.to_mapping() if simples is not None else None,
             responsible_name=responsible_name,
             responsible_company_count=responsible_company_count,
             accountant_name=accountant_name,
+            partner_count=root.partner_count,
         )

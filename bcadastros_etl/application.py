@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Protocol
 
-from .extractors import CadastroExtractor
 from .jsonl_writer import JsonlWriter
 from .models import CadastroRecord, ErrorRecord, RecordProcessingError
 
@@ -17,14 +17,25 @@ LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class ProcessingStats:
+    """Aggregate counts for one completed batch."""
+
     received: int
     written: int
     failed: int
 
 
+class RecordExtractor(Protocol):
+    """Minimal extractor contract consumed by the concurrent pipeline."""
+
+    def extract(self, cnpj: str) -> CadastroRecord:
+        """Extract one record for a normalized CNPJ."""
+        ...
+
+
 def _ordered_futures(
-    cnpjs: list[str], extractor: CadastroExtractor, workers: int
+    cnpjs: Sequence[str], extractor: RecordExtractor, workers: int
 ) -> Iterator[tuple[str, Future[CadastroRecord]]]:
+    """Submit a bounded future window and yield in original input order."""
     window_size = max(workers * 2, 1)
     source = iter(cnpjs)
     pending: deque[tuple[str, Future[CadastroRecord]]] = deque()
@@ -61,14 +72,33 @@ def _to_error(cnpj: str, error: Exception) -> ErrorRecord:
 
 
 def run_pipeline(
-    cnpjs: list[str],
-    input_errors: list[ErrorRecord],
-    extractor: CadastroExtractor,
+    cnpjs: Sequence[str],
+    input_errors: Sequence[ErrorRecord],
+    extractor: RecordExtractor,
     output_writer: JsonlWriter,
     error_writer: JsonlWriter | None,
     *,
     workers: int,
 ) -> ProcessingStats:
+    """Process a batch while isolating record failures from structural errors.
+
+    Args:
+        cnpjs: Valid normalized CNPJs in output order.
+        input_errors: Isolated validation errors already found in the input.
+        extractor: Record extraction implementation.
+        output_writer: Main JSONL destination.
+        error_writer: Optional isolated-error JSONL destination.
+        workers: Exact positive worker count selected by configuration.
+
+    Returns:
+        Aggregate received, written, and failed counts.
+
+    Raises:
+        ValueError: If ``workers`` is not a positive integer.
+        OSError: If a structural output operation fails.
+    """
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise ValueError("workers deve ser inteiro positivo")
     failed = len(input_errors)
     written = 0
 

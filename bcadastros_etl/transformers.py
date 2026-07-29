@@ -12,6 +12,7 @@ from typing import Any
 
 from .mappings import MOTIVO_SITUACAO, PORTE_EMPRESA, SITUACAO_CADASTRAL, SITUACOES_TERMINAIS
 from .models import AccountantSelection, CadastroRecord
+from .normalization import normalize_cnpj, normalize_numeric_document
 
 LOGGER = logging.getLogger(__name__)
 _DIGITS_RE = re.compile(r"\D+")
@@ -20,7 +21,7 @@ _YYYYMMDD_RE = re.compile(r"^\d{8}$")
 
 def is_filled(value: Any) -> bool:
     """Retorna se um valor escalar esta preenchido segundo as regras A/G."""
-    if value is None:
+    if value is None or isinstance(value, bool):
         return False
     if isinstance(value, str):
         return bool(value.strip())
@@ -38,6 +39,11 @@ def normalize_text(value: Any, *, lowercase: bool = False) -> str | None:
 
 
 def digits_only(value: Any) -> str | None:
+    """Remove formatting from fields whose contract is exclusively numeric.
+
+    This permissive helper is retained for non-document fields such as CNAE.
+    CNPJ and CPF must use their dedicated strict normalizers.
+    """
     if value is None or isinstance(value, bool):
         return None
     digits = _DIGITS_RE.sub("", str(value))
@@ -45,14 +51,21 @@ def digits_only(value: Any) -> str | None:
 
 
 def normalize_document(value: Any, expected_length: int) -> str | None:
-    document = digits_only(value)
-    if document is None or len(document) != expected_length:
-        return None
-    return document
+    """Normalize a numeric-only document such as CPF.
+
+    Args:
+        value: Raw numeric document.
+        expected_length: Required number of digits.
+
+    Returns:
+        Normalized document, or ``None`` when invalid.
+    """
+    return normalize_numeric_document(value, expected_length)
 
 
 def normalize_code(value: Any) -> str | None:
-    if value is None:
+    """Normalize a one- or two-position domain code."""
+    if value is None or isinstance(value, bool):
         return None
     code = str(value).strip()
     if not code:
@@ -83,6 +96,7 @@ def parse_date(value: Any) -> date | None:
 
 
 def format_timestamp(value: Any) -> str | None:
+    """Format a valid date as the timestamp expected by the JSONL contract."""
     parsed = parse_date(value)
     return parsed.strftime("%Y-%m-%dT00:00:00") if parsed else None
 
@@ -187,13 +201,12 @@ def rule_g(establishment: Mapping[str, Any]) -> AccountantSelection:
     else:
         return AccountantSelection(None, None, None, None, None)
 
-    document = digits_only(raw_document)
-    if document is not None and len(document) == 14:
-        document_type = "CNPJ"
-    elif document is not None and len(document) == 11:
-        document_type = "CPF"
+    if source == "PJ":
+        document = normalize_cnpj(raw_document)
+        document_type = "CNPJ" if document is not None else None
     else:
-        document_type = None
+        document = normalize_numeric_document(raw_document, 11)
+        document_type = "CPF" if document is not None else None
 
     outside_al = None if uf is None else ("N" if uf == "AL" else "S")
     return AccountantSelection(document, document_type, uf, source, outside_al)
@@ -214,7 +227,7 @@ def rule_h(socios: Any) -> int:
 
 def parse_capital_social(value: Any) -> Decimal | None:
     """Converte a representacao em centavos usando Decimal."""
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     text = str(value).strip()
     if not text:
@@ -245,8 +258,30 @@ def build_record(
     responsible_name: Any,
     responsible_company_count: int,
     accountant_name: Any,
+    partner_count: int | None = None,
 ) -> CadastroRecord:
-    """Combina as tres estruturas Couch e aplica as regras locais."""
+    """Combine CouchDB data and apply the local transformation rules.
+
+    Args:
+        cnpj: Normalized numeric or alphanumeric CNPJ.
+        root: Root source fields.
+        establishment: Full establishment source fields.
+        simples: Simples and MEI period source fields, when found.
+        responsible_name: Name returned for the responsible CPF.
+        responsible_company_count: Complete result of Rule I.
+        accountant_name: Name returned for the selected accountant.
+        partner_count: Compact root partner count. When omitted, the ``socios``
+            list in ``root`` is counted for compatibility callers.
+
+    Returns:
+        A record in the stable public JSONL schema.
+
+    Raises:
+        ValueError: If ``cnpj`` is not a valid normalized CNPJ.
+    """
+    normalized_cnpj = normalize_cnpj(cnpj)
+    if normalized_cnpj is None or normalized_cnpj != cnpj:
+        raise ValueError("CNPJ informado a transformacao nao esta normalizado")
     responsible_document = normalize_document(root.get("cpfResponsavel"), 11)
     accountant = rule_g(establishment)
     period_simples = _first_present("PeriodoSimples", simples, root, establishment)
@@ -256,10 +291,10 @@ def build_record(
     data_inicio = establishment.get("dataInicioAtividade")
 
     return CadastroRecord(
-        NUM_CNPJ=cnpj,
+        NUM_CNPJ=normalized_cnpj,
         NOM_RAZAO_SOCIAL=normalize_text(root.get("nomeEmpresarial")),
         NUM_DOC_RESP=responsible_document,
-        COD_TIPDOC_RESP="CPF" if responsible_document else None,
+        COD_TIPDOC_RESP="CPF",
         NOM_RAZAO_SOCIAL_RESP=normalize_text(responsible_name),
         QTD_EMPRESAS_RESP=responsible_company_count,
         IND_OPCAO_SIMPLES=rule_a(period_simples, field_name="PeriodoSimples"),
@@ -291,5 +326,5 @@ def build_record(
         NOM_RAZAO_SOCIAL_CONT=normalize_text(accountant_name),
         IND_ENDERECO_CONT_FORA_AL=accountant.outside_al,
         NOM_EMAIL_CAD=normalize_text(establishment.get("email"), lowercase=True),
-        QTD_SOCIO_RAIZ=rule_h(root.get("socios")),
+        QTD_SOCIO_RAIZ=rule_h(root.get("socios")) if partner_count is None else partner_count,
     )

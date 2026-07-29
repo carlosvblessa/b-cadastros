@@ -5,33 +5,48 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .models import ErrorRecord
-from .transformers import digits_only
+from .normalization import normalize_cnpj
 
 
 def read_cnpjs(lines: Iterable[str]) -> tuple[list[str], list[ErrorRecord]]:
-    """Normaliza, deduplica na primeira ocorrencia e separa erros de entrada."""
+    """Normalize, deduplicate, and separate isolated input errors.
+
+    Args:
+        lines: Text lines containing one numeric or alphanumeric CNPJ each.
+
+    Returns:
+        Valid normalized CNPJs in first-occurrence order and isolated errors.
+    """
     valid: list[str] = []
     errors: list[ErrorRecord] = []
     seen: set[str] = set()
+    seen_invalid: set[str] = set()
 
     for line in lines:
         raw = line.strip()
         if not raw:
             continue
-        normalized = digits_only(raw) or ""
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        if len(normalized) != 14:
+        normalized = normalize_cnpj(raw)
+        if normalized is None:
+            invalid_key = raw.upper()
+            if invalid_key in seen_invalid:
+                continue
+            seen_invalid.add(invalid_key)
             errors.append(
                 ErrorRecord(
-                    cnpj=normalized,
+                    cnpj=raw,
                     etapa="validacao_entrada",
                     tipo_erro="CNPJInvalido",
-                    mensagem=f"CNPJ deve possuir 14 digitos; recebido com {len(normalized)}",
+                    mensagem=(
+                        "CNPJ invalido: informe 14 posicoes; as 12 primeiras "
+                        "aceitam letras ASCII ou digitos e as duas ultimas exigem digitos"
+                    ),
                 )
             )
             continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
         valid.append(normalized)
 
     return valid, errors

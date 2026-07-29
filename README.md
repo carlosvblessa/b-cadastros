@@ -1,136 +1,173 @@
 # b-cadastros ETL cadastral
 
-Aplicação Python 3.10 que recebe CNPJs, extrai os documentos cadastrais do CouchDB
-b-cadastros, aplica as regras A–I de `tmp/regras.md` e grava JSON Lines para consumo por
-uma transformação Pentaho. Cada linha da saída principal representa um CNPJ processado
-com sucesso.
+Aplicação de linha de comando em Python 3.10 que recebe CNPJs, consulta dados cadastrais
+no CouchDB/b-cadastros, aplica as regras A–I de [`tmp/regras.md`](tmp/regras.md) e gera
+JSON Lines (JSONL) para consumo posterior por uma transformação Pentaho.
 
-Os scripts R/PostgreSQL existentes continuam no repositório como legado funcional e não
-foram alterados. A aplicação Python não consulta Oracle nem PostgreSQL.
+O Python não consulta Oracle nem PostgreSQL. Os scripts R, SQL e utilitários legados
+permanecem no repositório, mas não fazem parte do pacote `bcadastros_etl`.
 
-## Escopo e integração com o Pentaho
+## Escopo e fluxo
 
-O Python faz apenas a extração do b-cadastros e as transformações integralmente definidas
-no de/para. O Pentaho receberá o JSONL e fará posteriormente os lookups e enriquecimentos
-Oracle, como município, subsetor/CNAE, CACEAL e identificadores internos.
+Para cada CNPJ válido, a aplicação:
 
-As fontes CouchDB confirmadas no ambiente existente são:
+1. normaliza e deduplica a entrada, mantendo a primeira ocorrência;
+2. obtém a raiz pelas oito primeiras posições;
+3. consulta a projeção da raiz, o estabelecimento completo e os períodos de Simples/MEI;
+4. consulta nome e quantidade de empresas do responsável, quando há CPF válido;
+5. seleciona o contador PJ antes do PF e consulta seu nome;
+6. aplica as regras funcionais locais;
+7. grava o resultado em ordem de entrada ou isola o erro daquele registro.
 
-| Informação | Banco padrão | Chave do documento |
+As consultas confirmadas no desenho atual são:
+
+| Informação | Banco padrão | Identificador |
 | --- | --- | --- |
-| Cadastro da empresa/raiz e sócios | `chcnpj_bcadastros_replica` | CNPJ raiz, 8 dígitos |
-| Estabelecimento | `chcnpj_bcadastros_replica` | CNPJ completo, 14 dígitos |
-| Pessoa física | `chcpf_bcadastros_replica` | CPF, 11 dígitos |
-| Simples e MEI | `chsn_bcadastros_replica` | CNPJ raiz, 8 dígitos |
-| Empresas por responsável | banco CNPJ, endpoint `/_find` | índice `idx-cpf-responsavel` |
+| Empresa/raiz | `chcnpj_bcadastros_replica` | raiz de 8 posições |
+| Estabelecimento | `chcnpj_bcadastros_replica` | CNPJ de 14 posições |
+| Pessoa física | `chcpf_bcadastros_replica` | CPF de 11 dígitos |
+| Simples e MEI | `chsn_bcadastros_replica` | raiz de 8 posições |
+| Empresas por responsável | banco CNPJ, `/_find` | índice `idx-cpf-responsavel` |
 
-### Responsabilidade por campo
+Raízes e CNPJs podem conter letras. CPF continua exclusivamente numérico.
 
-| Campo de destino | Responsável nesta etapa | Observação |
-| --- | --- | --- |
-| `NUM_CNPJ` | Python | Documento como string de 14 dígitos |
-| `NOM_RAZAO_SOCIAL` | Python | Cadastro da raiz |
-| `NUM_DOC_RESP` | Python | CPF normalizado |
-| `COD_TIPDOC_RESP` | Python | `CPF` quando o documento é válido |
-| `NOM_RAZAO_SOCIAL_RESP` | Python | Nome consultado no banco CPF |
-| `QTD_EMPRESAS_RESP` | Python | Regra I, todas as páginas Mango |
-| `IND_OPCAO_SIMPLES` | Python | Regra A |
-| `IND_SIMPLES_AUXILIAR` | Python | Regra B |
-| `IND_MEI` | Python | Regra A |
-| `IND_MEI_AUXILIAR` | Python | Regra B |
-| `VAL_CAPITAL_SOCIAL_PJ` | Python | Centavos convertidos com `Decimal` |
-| `DTH_INICIO_CNPJ` | Python | Data ISO à meia-noite |
-| `DTH_TERMINO_CNPJ` | Python | Regra D |
-| `DTH_INICIO_RAIZ` | Python | Mesmo `dataInicioAtividade` definido no de/para |
-| `DSC_PORTE` | Python | Regra E |
-| `IND_MATRIZ` | Python | `S` para indicador `1`; caso contrário `N` |
-| `COD_CNAE` | Python | Código como string numérica |
-| `DSC_SITUACAO_CADASTRAL_CNPJ` | Python | Regra C |
-| `DTH_SITUACADA_CNPJ` | Python | Data ISO à meia-noite |
-| `DSC_MOTIVO_SITUCADA_CNPJ` | Python | Mapeamento local completo da Regra F |
-| `NUM_DOC_CONTADOR` | Python | Regra G, com prioridade para PJ |
-| `COD_TIPDOC_CONTADOR` | Python | `CNPJ`, `CPF` ou `null` |
-| `NOM_RAZAO_SOCIAL_CONT` | Python | Banco CNPJ-raiz ou CPF, conforme contador escolhido |
-| `IND_ENDERECO_CONT_FORA_AL` | Python | Usa a UF da mesma fonte escolhida na Regra G |
-| `NOM_EMAIL_CAD` | Python | Texto em minúsculas |
-| `QTD_SOCIO_RAIZ` | Python | Regra H |
-| `NUM_PESSOA_CNPJ`, `NUM_PESSOA_RAIZ` | Oracle/Pentaho | Identificadores internos |
-| `NUM_PESSOA_RESP`, `NUM_PESSOA_CONTADOR` | Oracle/Pentaho | Identificadores internos |
-| `COD_TIPCONTR`, `DSC_TIPCONTR` | Oracle/Pentaho | Cadastro interno |
-| `COD_UNIDMEDI`, `NUM_AREA` | Oracle/Pentaho | Cadastro interno |
-| `NOM_MUNICIPIO` | Oracle/Pentaho | Lookup de `codigoMunicipio` |
-| `DSC_SUBSETOR` | Oracle/Pentaho | Lookup de CNAE |
-| `COD_SITUCADA`, `DSC_SITUACAO_CADASTRAL` | Oracle/Pentaho | CACEAL |
-| `IND_ATIVO_SITUCADA`, `SEQ_MOTIALSC_SITUCADA` | Oracle/Pentaho | CACEAL |
-| `DSC_MOTIALSC_SITUCADA`, `DTH_ALTERACAO_SITUCADA` | Oracle/Pentaho | CACEAL |
-| `IND_ESTEVE_INATIVO` | Oracle/Pentaho | CACEAL |
-| `IND_RESP`, `IND_NOTEIRA`, `IND_EMAIL` | Pentaho, pendente de regra | Não implementados: `tmp/regras.md` os marca como ETL sem regra explícita |
+## Compatibilidade
 
-Não há cliente Oracle, SQL Oracle nem dependência de Oracle neste pacote.
+- Python oficial: `>=3.10,<3.11`;
+- CNPJ antigo, inteiramente numérico;
+- CNPJ alfanumérico: 14 posições, letras ASCII ou dígitos nas 12 primeiras e dígitos
+  verificadores nas duas últimas;
+- entrada mascarada no formato `XX.XXX.XXX/XXXX-XX` ou sem máscara;
+- letras minúsculas são convertidas para maiúsculas;
+- zeros à esquerda são preservados;
+- não há validação matemática dos dígitos verificadores.
 
-## Requisitos e instalação
+Exemplos aceitos:
 
-- Linux;
-- Python `>=3.10,<3.11` (versão oficial: 3.10);
-- acesso HTTP(S) aos três bancos CouchDB;
-- usuário CouchDB somente leitura. O procedimento legado está em `cria_user_etl.md`.
+```text
+12.345.678/0001-95 -> 12345678000195
+12.345.678/000A-08 -> 12345678000A08
+AA.345.678/0003-29 -> AA345678000329
+```
 
-Fluxo completo de desenvolvimento:
+Caracteres inesperados e máscaras fora do formato são rejeitados. A aplicação não usa
+remoção indiscriminada de não dígitos para CNPJ. O contador PJ segue a mesma normalização;
+contador PF e responsável usam uma rotina separada e exclusivamente numérica.
+
+## Instalação
+
+Não versione `.venv`:
 
 ```bash
 python3.10 -m venv .venv
 source .venv/bin/activate
-
 python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt
 ```
 
-O pacote usa somente três dependências de execução pequenas: `requests`,
-`python-dotenv` e `simplejson`. A última preserva `Decimal` como número JSON, sem
-convertê-lo em string ou `float`.
+As dependências de execução são `requests`, `python-dotenv` e `simplejson`. Não há
+cliente Oracle, framework web, biblioteca assíncrona ou cache externo.
 
 ## Configuração
 
-Copie o modelo e edite apenas o arquivo local, que é ignorado pelo Git:
+Em produção, prefira variáveis de ambiente fornecidas pelo orquestrador. Um arquivo
+dotenv só é lido quando indicado explicitamente; assim, a execução não depende do
+diretório corrente:
 
 ```bash
-cp .env.example .env
+cp .env.example config.env
+
+python -m bcadastros_etl \
+  --env-file /caminho/absoluto/config.env \
+  --input /dados/cnpjs.txt \
+  --output /dados/resultado.jsonl \
+  --errors /dados/erros.jsonl
 ```
 
-| Variável | Padrão/uso |
+| Variável | Padrão/regra |
 | --- | --- |
-| `COUCHDB_URL` | URL base opcional; alternativa a scheme/host/port |
-| `COUCHDB_SCHEME` | `http`; alias legado `COUCH_SCHEME` |
-| `COUCHDB_HOST` | obrigatório sem `COUCHDB_URL`; alias `COUCH_HOST` |
-| `COUCHDB_PORT` | `5984`; alias `COUCH_PORT` |
-| `COUCHDB_USER`, `COUCHDB_PASSWORD` | credenciais obrigatórias; aliases `COUCH_USER`/`COUCH_PASS` |
-| `COUCHDB_USER_ETL`, `COUCHDB_PASSWORD_ETL` | se definidos, têm prioridade sobre a conta geral |
-| `COUCH_DB_CNPJ`, `COUCH_DB_CPF`, `COUCH_DB_SN` | bancos mostrados na tabela de fontes |
-| `COUCHDB_TIMEOUT` | timeout por tentativa, padrão `30` segundos |
-| `COUCHDB_MAX_ATTEMPTS` | total de tentativas, padrão `3` |
-| `COUCHDB_BACKOFF_FACTOR` | espera exponencial inicial, padrão `0.5` segundo |
-| `COUCHDB_PAGE_LIMIT` | página da Regra I, padrão `1000` |
-| `COUCHDB_WORKERS` | concorrência máxima, padrão conservador `4` |
-| `COUCHDB_VERIFY_SSL` | valida certificado TLS, padrão `true` |
-| `COUCH_IDX_RESP_DDOC`, `COUCH_IDX_RESP_NAME` | design doc e nome do índice da Regra I |
+| `COUCHDB_URL` | URL HTTP(S); alternativa a scheme/host/port |
+| `COUCHDB_SCHEME` | `http`; aceita alias legado `COUCH_SCHEME` |
+| `COUCHDB_HOST` | obrigatório sem URL; alias `COUCH_HOST` |
+| `COUCHDB_PORT` | `5984`, inteiro entre 1 e 65535; alias `COUCH_PORT` |
+| `COUCHDB_USER`, `COUCHDB_PASSWORD` | obrigatórios e não vazios |
+| `COUCHDB_USER_ETL`, `COUCHDB_PASSWORD_ETL` | prioridade sobre a conta geral |
+| `COUCH_DB_CNPJ` | `chcnpj_bcadastros_replica` |
+| `COUCH_DB_CPF` | `chcpf_bcadastros_replica` |
+| `COUCH_DB_SN` | `chsn_bcadastros_replica` |
+| `COUCHDB_TIMEOUT` | `30`, segundos positivos por tentativa |
+| `COUCHDB_MAX_ATTEMPTS` | `3`, total positivo de tentativas |
+| `COUCHDB_BACKOFF_FACTOR` | `0.5`, espera exponencial não negativa |
+| `COUCHDB_PAGE_LIMIT` | `1000`, tamanho positivo da página da Regra I |
+| `WORKERS` | `4`, inteiro maior ou igual a 1 |
+| `COUCHDB_VERIFY_SSL` | `true` |
+| `COUCH_IDX_RESP_DDOC` | `_design/idx_cpf_responsavel` |
+| `COUCH_IDX_RESP_NAME` | `idx-cpf-responsavel` |
 | `COUCH_CPF_ID_PREFIX` | prefixo opcional do `_id` de CPF |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR` ou `CRITICAL` |
 
-Credenciais são enviadas por autenticação básica separada da URL e nunca são incluídas
-nas mensagens de erro. Para HTTPS com certificado privado, prefira instalar a CA no
-sistema; desative `COUCHDB_VERIFY_SSL` apenas em ambiente controlado.
+Valores obrigatórios contendo apenas espaços são rejeitados. Credenciais ficam fora da
+URL e nunca são incluídas em mensagens ou métricas.
+
+### Concorrência
+
+A precedência é:
+
+1. `--workers`;
+2. variável `WORKERS`;
+3. padrão fixo `4`.
+
+Não existe ajuste por `os.cpu_count()` nem limitação silenciosa do valor solicitado. A
+quantidade efetiva é registrada no início da execução. Quatro workers produziram o
+melhor resultado geral no teste comparativo original com 4, 8, 12 e 16 workers. Esse
+valor deve ser recalibrado em outro servidor ou após mudanças no CouchDB, rede ou código.
+
+```bash
+# Usa 4
+python -m bcadastros_etl --input cnpjs.txt --output resultado.jsonl
+
+# CLI prevalece sobre WORKERS
+export WORKERS=8
+python -m bcadastros_etl \
+  --input cnpjs.txt \
+  --output resultado.jsonl \
+  --workers 12
+```
+
+### Caches limitados
+
+Estabelecimentos nunca entram em cache. Eles normalmente são lidos uma vez porque a
+entrada já foi deduplicada. Os dados reutilizáveis usam caches LRU independentes,
+thread-safe e limitados:
+
+| Variável | Padrão | Conteúdo compacto |
+| --- | ---: | --- |
+| `CACHE_ROOT_MAXSIZE` | 20000 | nome, CPF responsável, capital, porte e quantidade de sócios |
+| `CACHE_SIMPLES_MAXSIZE` | 20000 | períodos de Simples e MEI |
+| `CACHE_PERSON_MAXSIZE` | 10000 | nomes de pessoas físicas |
+| `CACHE_ACCOUNTANT_MAXSIZE` | 10000 | nomes de contadores por tipo/documento |
+| `CACHE_RESPONSIBLE_COUNT_MAXSIZE` | 10000 | contagens completas da Regra I |
+
+Os limites são quantidades de entradas, aceitam zero para desabilitar o cache e nunca
+podem ser negativos. Respostas não encontradas (`None`) também podem ser armazenadas
+para evitar consultas repetidas.
+
+Ao fim do lote, cada cache registra somente `hits`, `misses`, inclusões, remoções LRU,
+tamanho atual e máximo. Documentos e credenciais não aparecem no log.
 
 ## Entrada
 
-O arquivo recebe um CNPJ por linha, com ou sem máscara. Linhas vazias são ignoradas,
-duplicidades são removidas mantendo a primeira ocorrência e documentos com tamanho
-diferente de 14 são registrados como erros isolados. Não há validação de dígitos
-verificadores.
+O arquivo ou `stdin` recebe um CNPJ por linha:
 
 ```text
 00.123.456/0001-99
-98765432000100
+12.345.678/000A-08
+AA345678000329
 ```
+
+Linhas vazias são ignoradas. Formas mascarada e não mascarada do mesmo CNPJ são
+deduplicadas. Uma linha inválida vira registro isolado no JSONL de erros e não interrompe
+o lote.
 
 Arquivo:
 
@@ -149,94 +186,179 @@ cat cnpjs.txt | python -m bcadastros_etl \
   --errors erros.jsonl
 ```
 
-Também é possível escrever os dados em `stdout` omitindo `--output` ou informando
-`--output -`. Logs continuam em `stderr`. `--errors` sempre exige um arquivo para não
-misturar falhas com os dados destinados ao Pentaho.
+Omitir `--output` ou usar `--output -` escreve dados em `stdout`. Logs continuam em
+`stderr`. `--errors` exige um arquivo para impedir mistura entre erros e dados.
 
-## Saída e erros
+## Saída JSONL
 
-A saída é UTF-8, contém um objeto por linha, usa `ensure_ascii=False`, mantém ordem
-estável de chaves e representa ausências com `null`. Datas válidas saem como
-`YYYY-MM-DDT00:00:00`, documentos como strings, indicadores como `S`/`N` e capital
-social como número JSON.
+Cada linha bem-sucedida é um objeto JSON UTF-8 com 26 campos em ordem estável.
+Ausências usam `null`; datas usam `YYYY-MM-DDT00:00:00`; documentos permanecem strings;
+indicadores usam `S`/`N`; `Decimal` é serializado como número JSON.
 
-Exemplo reduzido:
+Exemplo sintético e anonimizado:
 
 ```json
-{"NUM_CNPJ":"00123456000199","NOM_RAZAO_SOCIAL":"EMPRESA ÁRVORE LTDA","IND_OPCAO_SIMPLES":"S"}
-{"NUM_CNPJ":"98765432000100","NOM_RAZAO_SOCIAL":"OUTRA EMPRESA SA","IND_OPCAO_SIMPLES":"N"}
+{"NUM_CNPJ":"AA345678000329","NOM_RAZAO_SOCIAL":"EMPRESA EXEMPLO LTDA","NUM_DOC_RESP":null,"COD_TIPDOC_RESP":"CPF","QTD_EMPRESAS_RESP":0,"IND_OPCAO_SIMPLES":"N","IND_MEI":"N"}
 ```
 
-O arquivo de erros é separado:
+`COD_TIPDOC_RESP` é sempre `"CPF"`, inclusive quando `NUM_DOC_RESP` é `null`. Essa
+decisão segue literalmente `tmp/regras.md`, fonte funcional principal.
+
+Textos cadastrais são aparados e convertidos para maiúsculas, preservando acentos. E-mail
+é a única exceção e sai em minúsculas. O formato completo está em
+[`examples/resultado_esperado.jsonl`](examples/resultado_esperado.jsonl).
+
+## Erros, retentativas e códigos de saída
+
+Erros isolados são gravados separadamente:
 
 ```json
-{"cnpj":"00123456000199","etapa":"consulta_cnpj","tipo_erro":"CouchDBHTTPError","mensagem":"Resposta HTTP 503 apos 3 tentativas"}
+{"cnpj":"AA345678000329","etapa":"consulta_cnpj","tipo_erro":"CouchDBHTTPError","mensagem":"Resposta HTTP 503 apos 3 tentativas"}
 ```
 
-Retentativas são feitas para timeout, falha de conexão, HTTP 429 e HTTP 5xx, com espera
-progressiva e respeito ao `Retry-After` numérico. Um erro de registro não interrompe os
-demais.
+Timeout, falha de conexão, HTTP 429 e HTTP 5xx recebem retentativas com espera
+exponencial e suporte a `Retry-After` numérico.
 
-| Código de saída | Significado |
-| --- | --- |
-| `0` | lote concluído, inclusive quando há erros isolados |
-| `2` | falha estrutural conhecida: configuração, entrada ou criação de saída |
+A Regra I só grava uma contagem quando percorre todas as páginas. Depois de uma página
+cheia, bookmark ausente, vazio, repetido ou já utilizado lança
+`CouchDBPaginationError`; `docs` ausente/nulo, JSON inválido e estrutura inesperada
+também falham. Nesses casos, o CNPJ vai para o JSONL de erros e nenhuma contagem parcial
+chega à saída principal. Uma página menor que o limite encerra normalmente.
+
+| Código | Significado |
+| ---: | --- |
+| `0` | lote concluído, inclusive com erros isolados |
+| `2` | falha estrutural conhecida de configuração, entrada ou saída |
 | `3` | falha estrutural inesperada |
 
-## Regras e decisões de implementação
+Falhas de um estabelecimento ou raiz inexistente continuam isoladas e não alteram o
+código zero do restante do lote.
 
-- Textos do JSON são aparados e convertidos para maiúsculas, preservando acentos;
-  somente e-mail é convertido para minúsculas.
-- CNPJ/CPF nunca são convertidos para inteiro ou validados por dígito verificador.
-- `PeriodoSimples` e `PeriodoMEI` aceitam `null`, string JSON, objeto ou lista. O CouchDB
-  real usa listas; nesse caso é escolhido o período mais recente por `Inicio`, seguindo o
-  comportamento útil do R. As regras A/B usam apenas `Inicio` e `Fim`, como definido em
-  `tmp/regras.md`; `Cancelado` e `Anulado` não acrescentam condições não documentadas.
-- JSON inválido de período gera aviso e equivale a período vazio.
-- A Regra I encerra com segurança em página curta, ausência de `docs`, bookmark vazio ou
-  repetido. Respostas estruturalmente inválidas viram erro isolado do CNPJ.
-- Ausência de documento de Simples/MEI significa indicadores `N`. Pessoa ou contador não
-  encontrado gera nome `null`. A ausência do cadastro-raiz ou do estabelecimento impede
-  um registro completo e é escrita no arquivo de erros.
-- `DTH_INICIO_RAIZ` replica `dataInicioAtividade` do estabelecimento porque essa é a regra
-  explícita no de/para; não foi inventada uma consulta para descobrir a primeira filial.
-- Há uma inconsistência aritmética no exemplo de capital em `tmp/regras.md`:
-  `00000001800000 / 100 = 18000.00`. Para representar `180000.00` em centavos, a origem
-  deve ser `00000018000000`. A implementação segue a regra textual e o R (`Decimal / 100`),
-  preservando zeros à esquerda sem deixá-los alterar o valor.
+### Reprocessamento
+
+Depois de corrigir a causa (documento replicado, índice, rede ou configuração), gere uma
+nova lista a partir dos erros:
+
+```bash
+jq -r 'select(.etapa != "validacao_entrada") | .cnpj' erros.jsonl \
+  > cnpjs_reprocessar.txt
+
+python -m bcadastros_etl \
+  --input cnpjs_reprocessar.txt \
+  --output resultado_reprocessado.jsonl \
+  --errors erros_reprocessados.jsonl
+```
+
+Erros de `validacao_entrada` devem ser corrigidos antes do reprocessamento. O resultado
+reprocessado deve ser conciliado pelo `NUM_CNPJ` no fluxo Pentaho, sem concatenar linhas
+às cegas.
+
+## Regras e decisões funcionais
+
+- Regras A e B aceitam período como string JSON, objeto ou lista; em lista, escolhem o
+  período com `Inicio` mais recente.
+- JSON de período inválido gera aviso e equivale a período vazio.
+- Regras C–F usam os mapeamentos de `tmp/regras.md`.
+- Regra G privilegia a origem `contadorPJ`, aplica normalização alfanumérica de CNPJ e só
+  usa `contadorPF` quando PJ está ausente.
+- Regra H armazena apenas a quantidade de sócios na projeção da raiz.
+- Regra I consulta somente `["_id"]` e exige paginação completa.
+- `DTH_INICIO_RAIZ` replica `dataInicioAtividade`, conforme o de/para.
+- Capital social usa `Decimal(capitalSocial) / 100`. O exemplo aritmético de
+  `tmp/regras.md` é inconsistente: `00000001800000 / 100` resulta em `18000.00`;
+  a implementação segue a regra textual e o comportamento legado.
+
+## Integração futura com Pentaho/Oracle
+
+O JSONL é a fronteira entre Python e Pentaho. Continuam fora deste pacote:
+
+- `NUM_PESSOA_CNPJ`, `NUM_PESSOA_RAIZ`, `NUM_PESSOA_RESP`,
+  `NUM_PESSOA_CONTADOR`;
+- `COD_TIPCONTR`, `DSC_TIPCONTR`, `COD_UNIDMEDI`, `NUM_AREA`;
+- lookup de município e subsetor/CNAE;
+- campos CACEAL `COD_SITUCADA`, `DSC_SITUACAO_CADASTRAL`,
+  `IND_ATIVO_SITUCADA`, `SEQ_MOTIALSC_SITUCADA`,
+  `DSC_MOTIALSC_SITUCADA`, `DTH_ALTERACAO_SITUCADA`,
+  `IND_ESTEVE_INATIVO`;
+- `IND_RESP`, `IND_NOTEIRA` e `IND_EMAIL`, ainda sem regra explícita.
+
+Não existe dependência Oracle no pacote Python.
 
 ## Arquitetura
 
 ```text
 bcadastros_etl/
-  cli.py                 argumentos e códigos de saída
-  config.py              ambiente/.env e validação
-  couchdb_client.py      HTTP, cache, retentativas e paginação
-  extractors.py          composição raiz/estabelecimento/SN/CPF
-  transformers.py        regras A–H e transformações puras
-  mappings.py            domínios locais, incluindo a Regra F
-  models.py              ordem e tipos do registro de saída
-  input_reader.py        normalização/deduplicação da entrada
-  jsonl_writer.py        serialização JSONL/Decimal
-  application.py         concorrência limitada e ordem estável
+  normalization.py   normalização separada de CNPJ e documentos numéricos
+  cache.py           LRU genérico, thread-safe, limitado e com métricas
+  config.py          ambiente, --env-file e validação
+  couchdb_client.py  HTTP, projeções, caches, retentativas e Regra I
+  extractors.py      composição das consultas por CNPJ
+  transformers.py   regras A–H e transformações puras
+  mappings.py        domínios locais
+  models.py          projeções compactas e modelos da fronteira JSONL
+  input_reader.py    validação e deduplicação
+  jsonl_writer.py    serialização JSONL/Decimal
+  application.py     janela concorrente limitada e ordem estável
+  cli.py             argumentos, observabilidade e códigos de saída
 tests/
-  unit/                  regras e HTTP simulados
-  integration/           pipeline completo com dublês locais
-examples/                massa sintética de entrada e saída
+  unit/              normalização, regras, cache, HTTP e CLI
+  integration/       pipeline, isolamento e servidor HTTP local
+examples/            entrada e saída sintéticas
 ```
 
-Cada worker reutiliza uma sessão HTTP. Consultas repetidas a CPF, CNPJ-raiz, contador e
-quantidade de empresas são mantidas em cache durante o lote. A janela de futures é
-limitada e a saída respeita a ordem dos CNPJs válidos de entrada.
+Cada worker reutiliza uma sessão HTTP. A janela de futures é limitada a duas vezes a
+quantidade de workers e a saída preserva a ordem original.
 
 ## Testes e qualidade
 
+Os testes não acessam CouchDB real:
+
 ```bash
-pytest
 ruff check .
+ruff format --check .
 mypy bcadastros_etl
+pytest
 ```
 
-Os testes não acessam CouchDB real. A massa sintética está em `examples/cnpjs.txt` e
-`examples/resultado_esperado.jsonl`; ela documenta o formato, não pressupõe que esses
-CNPJs existam no ambiente.
+Ruff está configurado para Python 3.10, PEP 8, imports, modernização compatível, erros
+comuns e docstrings PEP 257 em convenção Google. Mypy verifica todas as funções tipadas
+do pacote.
+
+## Desempenho e memória
+
+Referência do lote anterior:
+
+- 576.922 entradas;
+- 576.913 sucessos e 9 erros isolados;
+- 1h09min50s, aproximadamente 137,7 CNPJs/s;
+- RSS máximo aproximado de 9,5 GiB.
+
+O desenho atual remove o fator principal de crescimento: nenhum dos 576.922 documentos
+de estabelecimento permanece em memória, e cada cache reutilizável tem tamanho máximo
+fixo.
+
+Uma medição sintética local em Python 3.10, com caches de raiz e Simples reduzidos
+deliberadamente a 1.000 entradas, processou 100.000 CNPJs e gerou documentos descartáveis
+de aproximadamente 8–18 KiB por consulta, sem rede:
+
+- 100.000 sucessos, zero erros e 300.000 consultas simuladas;
+- 16,566 s e 6.036,4 CNPJs/s;
+- RSS máximo de 34.936 KiB (aproximadamente 34,1 MiB);
+- cache de raiz: 1.000/1.000 entradas e 99.000 remoções LRU;
+- cache de Simples: 1.000/1.000 entradas e 99.000 remoções LRU;
+- nenhuma entrada de estabelecimento retida.
+
+Essa massa força 100.000 raízes distintas e comprova que a retenção dos caches permanece
+no limite configurado, em vez de acompanhar o total. A vazão sintética não é comparável
+aos 137,7 CNPJs/s reais porque não inclui CouchDB nem rede. Uma nova medição com o lote
+real ainda é necessária para comparar RSS, taxa de acerto e vazão no mesmo servidor.
+
+## Limitações conhecidas
+
+- não valida os dígitos verificadores de CNPJ/CPF;
+- não mede latência, RSS ou vazão do CouchDB real durante testes automatizados;
+- concorrência e tamanhos de cache podem exigir nova calibração por ambiente;
+- período inválido é tratado como vazio com aviso, seguindo o contrato atual;
+- enriquecimentos Oracle/Pentaho permanecem deliberadamente pendentes;
+- reprocessamento e conciliação final ainda precisam ser incorporados à transformação
+  Pentaho.

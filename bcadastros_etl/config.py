@@ -1,16 +1,25 @@
-"""Configuracao por ambiente, compativel com os nomes usados pelos scripts R."""
+"""Environment-based configuration with strict operational validation."""
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
+DEFAULT_WORKERS = 4
+DEFAULT_CACHE_ROOT_MAXSIZE = 20_000
+DEFAULT_CACHE_SIMPLES_MAXSIZE = 20_000
+DEFAULT_CACHE_PERSON_MAXSIZE = 10_000
+DEFAULT_CACHE_ACCOUNTANT_MAXSIZE = 10_000
+DEFAULT_CACHE_RESPONSIBLE_COUNT_MAXSIZE = 10_000
+
 
 class ConfigurationError(ValueError):
-    """Configuracao ausente ou invalida."""
+    """Configuration is absent, malformed, or operationally unsafe."""
 
 
 def _first_env(*names: str, default: str = "") -> str:
@@ -21,22 +30,45 @@ def _first_env(*names: str, default: str = "") -> str:
     return default
 
 
+def _required_text(name: str, value: str) -> str:
+    if not value.strip():
+        raise ConfigurationError(f"{name} nao pode estar vazio")
+    return value.strip()
+
+
 def _positive_int(name: str, value: str) -> int:
     try:
         parsed = int(value)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise ConfigurationError(f"{name} deve ser inteiro positivo") from exc
-    if parsed <= 0:
+    if isinstance(value, bool) or parsed <= 0:
         raise ConfigurationError(f"{name} deve ser inteiro positivo")
+    return parsed
+
+
+def _non_negative_int(name: str, value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(f"{name} deve ser inteiro nao negativo") from exc
+    if isinstance(value, bool) or parsed < 0:
+        raise ConfigurationError(f"{name} deve ser inteiro nao negativo")
+    return parsed
+
+
+def _port(name: str, value: str) -> int:
+    parsed = _positive_int(name, value)
+    if parsed > 65_535:
+        raise ConfigurationError(f"{name} deve estar entre 1 e 65535")
     return parsed
 
 
 def _positive_float(name: str, value: str, *, allow_zero: bool = False) -> float:
     try:
         parsed = float(value)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise ConfigurationError(f"{name} deve ser numerico") from exc
-    if parsed < 0 or (parsed == 0 and not allow_zero):
+    if not math.isfinite(parsed) or parsed < 0 or (parsed == 0 and not allow_zero):
         qualifier = "nao negativo" if allow_zero else "positivo"
         raise ConfigurationError(f"{name} deve ser {qualifier}")
     return parsed
@@ -51,8 +83,46 @@ def _boolean(name: str, value: str) -> bool:
     raise ConfigurationError(f"{name} deve ser true ou false")
 
 
+def _base_url_from_env() -> str:
+    base_url = _first_env("COUCHDB_URL").strip()
+    if not base_url:
+        scheme = _required_text(
+            "COUCHDB_SCHEME",
+            _first_env("COUCHDB_SCHEME", "COUCH_SCHEME", default="http"),
+        ).lower()
+        host = _required_text(
+            "COUCHDB_HOST",
+            _first_env("COUCHDB_HOST", "COUCH_HOST"),
+        )
+        port = _port(
+            "COUCHDB_PORT",
+            _first_env("COUCHDB_PORT", "COUCH_PORT", default="5984"),
+        )
+        base_url = f"{scheme}://{host}:{port}"
+
+    base_url = base_url.rstrip("/")
+    parsed_url = urlparse(base_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise ConfigurationError("COUCHDB_URL deve ser uma URL HTTP(S) valida")
+    if parsed_url.username or parsed_url.password:
+        raise ConfigurationError(
+            "nao inclua credenciais em COUCHDB_URL; use COUCHDB_USER e COUCHDB_PASSWORD"
+        )
+    try:
+        parsed_port = parsed_url.port
+    except ValueError as exc:
+        raise ConfigurationError("porta de COUCHDB_URL deve estar entre 1 e 65535") from exc
+    if parsed_port is not None and not 1 <= parsed_port <= 65_535:
+        raise ConfigurationError("porta de COUCHDB_URL deve estar entre 1 e 65535")
+    if parsed_url.hostname is None or not parsed_url.hostname.strip():
+        raise ConfigurationError("COUCHDB_URL deve informar um host valido")
+    return base_url
+
+
 @dataclass(frozen=True, slots=True)
 class CouchDBConfig:
+    """Validated configuration consumed by HTTP clients and the pipeline."""
+
     base_url: str
     username: str
     password: str
@@ -69,37 +139,48 @@ class CouchDBConfig:
     responsible_index_name: str
     cpf_id_prefix: str
     log_level: str
+    cache_root_maxsize: int = DEFAULT_CACHE_ROOT_MAXSIZE
+    cache_simples_maxsize: int = DEFAULT_CACHE_SIMPLES_MAXSIZE
+    cache_person_maxsize: int = DEFAULT_CACHE_PERSON_MAXSIZE
+    cache_accountant_maxsize: int = DEFAULT_CACHE_ACCOUNTANT_MAXSIZE
+    cache_responsible_count_maxsize: int = DEFAULT_CACHE_RESPONSIBLE_COUNT_MAXSIZE
 
     @classmethod
-    def from_env(cls, dotenv_path: str = ".env") -> CouchDBConfig:
-        load_dotenv(dotenv_path=dotenv_path, override=False)
+    def from_env(
+        cls,
+        dotenv_path: str | os.PathLike[str] | None = None,
+    ) -> CouchDBConfig:
+        """Load and validate configuration from environment variables.
 
-        base_url = _first_env("COUCHDB_URL")
-        if not base_url:
-            scheme = _first_env("COUCHDB_SCHEME", "COUCH_SCHEME", default="http")
-            host = _first_env("COUCHDB_HOST", "COUCH_HOST")
-            port = _first_env("COUCHDB_PORT", "COUCH_PORT", default="5984")
-            if not host:
-                raise ConfigurationError("configure COUCHDB_URL ou COUCHDB_HOST")
-            base_url = f"{scheme}://{host}:{port}"
+        An env file is read only when explicitly provided. This avoids coupling
+        production execution to the process working directory.
 
-        base_url = base_url.rstrip("/")
-        parsed_url = urlparse(base_url)
-        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-            raise ConfigurationError("COUCHDB_URL deve ser uma URL HTTP(S) valida")
-        if parsed_url.username or parsed_url.password:
-            raise ConfigurationError(
-                "nao inclua credenciais em COUCHDB_URL; use COUCHDB_USER e COUCHDB_PASSWORD"
-            )
+        Args:
+            dotenv_path: Optional explicit path to a dotenv file.
 
-        username = _first_env("COUCHDB_USER_ETL", "COUCHDB_USER", "COUCH_USER")
-        password = _first_env("COUCHDB_PASSWORD_ETL", "COUCHDB_PASSWORD", "COUCH_PASS")
-        if not username:
-            raise ConfigurationError("COUCHDB_USER nao configurado")
-        if not password:
-            raise ConfigurationError("COUCHDB_PASSWORD nao configurado")
+        Returns:
+            Fully validated immutable configuration.
 
-        log_level = _first_env("LOG_LEVEL", default="INFO").upper()
+        Raises:
+            ConfigurationError: If the env file or a setting is invalid.
+        """
+        if dotenv_path is not None:
+            env_file = Path(dotenv_path).expanduser()
+            if not env_file.is_file():
+                raise ConfigurationError(f"arquivo de ambiente nao encontrado: {env_file}")
+            load_dotenv(dotenv_path=env_file, override=False)
+
+        base_url = _base_url_from_env()
+        username = _required_text(
+            "COUCHDB_USER",
+            _first_env("COUCHDB_USER_ETL", "COUCHDB_USER", "COUCH_USER"),
+        )
+        password = _required_text(
+            "COUCHDB_PASSWORD",
+            _first_env("COUCHDB_PASSWORD_ETL", "COUCHDB_PASSWORD", "COUCH_PASS"),
+        )
+
+        log_level = _first_env("LOG_LEVEL", default="INFO").strip().upper()
         valid_log_levels = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
         if log_level not in valid_log_levels:
             raise ConfigurationError("LOG_LEVEL invalido")
@@ -108,16 +189,25 @@ class CouchDBConfig:
             base_url=base_url,
             username=username,
             password=password,
-            cnpj_database=_first_env(
-                "COUCH_DB_CNPJ", default="chcnpj_bcadastros_replica"
+            cnpj_database=_required_text(
+                "COUCH_DB_CNPJ",
+                _first_env("COUCH_DB_CNPJ", default="chcnpj_bcadastros_replica"),
             ),
-            cpf_database=_first_env("COUCH_DB_CPF", default="chcpf_bcadastros_replica"),
-            simples_database=_first_env("COUCH_DB_SN", default="chsn_bcadastros_replica"),
+            cpf_database=_required_text(
+                "COUCH_DB_CPF",
+                _first_env("COUCH_DB_CPF", default="chcpf_bcadastros_replica"),
+            ),
+            simples_database=_required_text(
+                "COUCH_DB_SN",
+                _first_env("COUCH_DB_SN", default="chsn_bcadastros_replica"),
+            ),
             timeout=_positive_float(
-                "COUCHDB_TIMEOUT", _first_env("COUCHDB_TIMEOUT", default="30")
+                "COUCHDB_TIMEOUT",
+                _first_env("COUCHDB_TIMEOUT", default="30"),
             ),
             page_limit=_positive_int(
-                "COUCHDB_PAGE_LIMIT", _first_env("COUCHDB_PAGE_LIMIT", default="1000")
+                "COUCHDB_PAGE_LIMIT",
+                _first_env("COUCHDB_PAGE_LIMIT", default="1000"),
             ),
             max_attempts=_positive_int(
                 "COUCHDB_MAX_ATTEMPTS",
@@ -129,17 +219,59 @@ class CouchDBConfig:
                 allow_zero=True,
             ),
             workers=_positive_int(
-                "COUCHDB_WORKERS", _first_env("COUCHDB_WORKERS", default="4")
+                "WORKERS",
+                _first_env("WORKERS", default=str(DEFAULT_WORKERS)),
             ),
             verify_ssl=_boolean(
-                "COUCHDB_VERIFY_SSL", _first_env("COUCHDB_VERIFY_SSL", default="true")
+                "COUCHDB_VERIFY_SSL",
+                _first_env("COUCHDB_VERIFY_SSL", default="true"),
             ),
-            responsible_index_ddoc=_first_env(
-                "COUCH_IDX_RESP_DDOC", default="_design/idx_cpf_responsavel"
+            responsible_index_ddoc=_required_text(
+                "COUCH_IDX_RESP_DDOC",
+                _first_env(
+                    "COUCH_IDX_RESP_DDOC",
+                    default="_design/idx_cpf_responsavel",
+                ),
             ),
-            responsible_index_name=_first_env(
-                "COUCH_IDX_RESP_NAME", default="idx-cpf-responsavel"
+            responsible_index_name=_required_text(
+                "COUCH_IDX_RESP_NAME",
+                _first_env("COUCH_IDX_RESP_NAME", default="idx-cpf-responsavel"),
             ),
             cpf_id_prefix=_first_env("COUCH_CPF_ID_PREFIX"),
             log_level=log_level,
+            cache_root_maxsize=_non_negative_int(
+                "CACHE_ROOT_MAXSIZE",
+                _first_env(
+                    "CACHE_ROOT_MAXSIZE",
+                    default=str(DEFAULT_CACHE_ROOT_MAXSIZE),
+                ),
+            ),
+            cache_simples_maxsize=_non_negative_int(
+                "CACHE_SIMPLES_MAXSIZE",
+                _first_env(
+                    "CACHE_SIMPLES_MAXSIZE",
+                    default=str(DEFAULT_CACHE_SIMPLES_MAXSIZE),
+                ),
+            ),
+            cache_person_maxsize=_non_negative_int(
+                "CACHE_PERSON_MAXSIZE",
+                _first_env(
+                    "CACHE_PERSON_MAXSIZE",
+                    default=str(DEFAULT_CACHE_PERSON_MAXSIZE),
+                ),
+            ),
+            cache_accountant_maxsize=_non_negative_int(
+                "CACHE_ACCOUNTANT_MAXSIZE",
+                _first_env(
+                    "CACHE_ACCOUNTANT_MAXSIZE",
+                    default=str(DEFAULT_CACHE_ACCOUNTANT_MAXSIZE),
+                ),
+            ),
+            cache_responsible_count_maxsize=_non_negative_int(
+                "CACHE_RESPONSIBLE_COUNT_MAXSIZE",
+                _first_env(
+                    "CACHE_RESPONSIBLE_COUNT_MAXSIZE",
+                    default=str(DEFAULT_CACHE_RESPONSIBLE_COUNT_MAXSIZE),
+                ),
+            ),
         )
